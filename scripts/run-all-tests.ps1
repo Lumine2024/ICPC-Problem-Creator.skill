@@ -2,8 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string[]]$Workspace,
-    [switch]$SkipSmokeTest
+    [string[]]$Workspace
 )
 
 Set-StrictMode -Version Latest
@@ -11,87 +10,106 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $examplesRoot = Join-Path $repoRoot "examples"
-$artifactsRoot = Join-Path $repoRoot ".codex-test-artifacts"
-$exampleMarkerToken = "CODEX_EXAMPLE_MARKER:"
-New-Item -ItemType Directory -Path $artifactsRoot -Force | Out-Null
-$tempRoot = Join-Path $artifactsRoot "tmp"
+$artifactRoot = Join-Path $repoRoot ".codex-test-artifacts"
+$script:IsWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$script:Failures = [System.Collections.Generic.List[object]]::new()
+
+New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+$tempRoot = Join-Path $artifactRoot "tmp"
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 $env:TEMP = $tempRoot
 $env:TMP = $tempRoot
 
-function Write-Log {
+function Write-Stage {
     param(
+        [Parameter(Mandatory = $true)]
+        [string]$Stage,
         [Parameter(Mandatory = $true)]
         [string]$Message
     )
 
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] $Message"
+    $color = switch ($Stage) {
+        "workspace" { "Cyan" }
+        "info" { "DarkCyan" }
+        "compile" { "Yellow" }
+        "generate" { "Magenta" }
+        "validate" { "Blue" }
+        "run-main" { "Green" }
+        "check-reference" { "DarkGreen" }
+        "check-wrong" { "DarkYellow" }
+        "success" { "Green" }
+        default { "White" }
+    }
+
+    Write-Host "[$Stage] $Message" -ForegroundColor $color
 }
 
-function Invoke-LoggedCommand {
+function Format-Command {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
-
-        [string[]]$ArgumentList = @(),
-
-        [string]$Description = $FilePath
+        [string[]]$Arguments = @()
     )
 
-    $renderedArgs = if ($ArgumentList.Count -gt 0) {
-        $ArgumentList -join " "
-    } else {
-        ""
-    }
+    $parts = @($FilePath) + $Arguments
+    return ($parts | ForEach-Object {
+        if ($_ -match '\s') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        } else {
+            $_
+        }
+    }) -join ' '
+}
 
-    Write-Log "START $Description"
-    Write-Log "CMD   $FilePath $renderedArgs"
-    & $FilePath @ArgumentList | Out-Host
-    $exitCode = $LASTEXITCODE
-    Write-Log "END   $Description (exit=$exitCode)"
-    return $exitCode
+function Add-Failure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Workspace,
+        [Parameter(Mandatory = $true)]
+        [string]$Stage,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [string]$Command = ""
+    )
+
+    $script:Failures.Add([pscustomobject]@{
+        Workspace = $Workspace
+        Stage     = $Stage
+        Message   = $Message
+        Command   = $Command
+    }) | Out-Null
+
+    Write-Host "[$Stage][error] ${Workspace}: $Message" -ForegroundColor Red
+    if ($Command) {
+        Write-Host "[$Stage][repro] $Command" -ForegroundColor DarkYellow
+    }
 }
 
 function Assert-FileExists {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "缺少文件：$Path"
+        throw "$Description 不存在：$Path"
     }
 }
 
-function Assert-DirectoryExists {
+function ConvertTo-Array {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
+        [object]$Value
     )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        throw "缺少目录：$Path"
+    if ($null -eq $Value) {
+        return ,@()
     }
-}
-
-function Assert-MarkerPresence {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [bool]$ShouldExist
-    )
-
-    $content = Get-Content -LiteralPath $Path -Raw
-    $hasMarker = $content -match [regex]::Escape($exampleMarkerToken)
-    if ($ShouldExist -and -not $hasMarker) {
-        throw "模板缺少示例标识：$Path"
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        return ,@($Value | ForEach-Object { [string]$_ })
     }
-    if (-not $ShouldExist -and $hasMarker) {
-        throw "非模板文件不应包含示例标识：$Path"
-    }
+    return ,@([string]$Value)
 }
 
 function Resolve-WorkspaceList {
@@ -102,218 +120,533 @@ function Resolve-WorkspaceList {
     if ($Requested -and $Requested.Count -gt 0) {
         return $Requested | ForEach-Object {
             if ([System.IO.Path]::IsPathRooted($_)) {
-                $_
+                [System.IO.Path]::GetFullPath($_)
             } else {
-                Join-Path $repoRoot $_
+                [System.IO.Path]::GetFullPath((Join-Path $repoRoot $_))
             }
         }
     }
 
-    return Get-ChildItem -LiteralPath $examplesRoot -Directory | Select-Object -ExpandProperty FullName
+    return Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter "config.json" -File |
+        Where-Object {
+            $_.FullName -notmatch '[\\/]\.git[\\/]' -and
+            $_.FullName -notmatch '[\\/]build[\\/]' -and
+            $_.FullName -notmatch '[\\/]\.codex-test-artifacts[\\/]' -and
+            $_.FullName -notmatch '[\\/]scripts[\\/]templates[\\/]'
+        } |
+        ForEach-Object { $_.Directory.FullName } |
+        Sort-Object -Unique
 }
 
-function Test-TemplateMarkers {
-    $templateFiles = @(
-        (Join-Path $PSScriptRoot "statement-template.md"),
-        (Join-Path $PSScriptRoot "interactive-statement-template.md"),
-        (Join-Path $PSScriptRoot "solution-template.md"),
-        (Join-Path $PSScriptRoot "checker-template.cpp"),
-        (Join-Path $PSScriptRoot "validator-template.cpp"),
-        (Join-Path $PSScriptRoot "generator-template.cpp"),
-        (Join-Path $PSScriptRoot "solution-template.cpp"),
-        (Join-Path $PSScriptRoot "brute-force-template.cpp"),
-        (Join-Path $PSScriptRoot "wrong-sol-template.cpp"),
-        (Join-Path $PSScriptRoot "interactive-checker-template.cpp"),
-        (Join-Path $PSScriptRoot "interactive-validator-template.cpp"),
-        (Join-Path $PSScriptRoot "interactive-solution-template.cpp"),
-        (Join-Path $PSScriptRoot "interactive-brute-force-template.cpp"),
-        (Join-Path $PSScriptRoot "interactive-wrong-sol-template.cpp")
+function Resolve-ProblemPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
     )
 
-    Write-Log "[template-markers]"
-    foreach ($templateFile in $templateFiles) {
-        Assert-FileExists $templateFile
-        Assert-MarkerPresence -Path $templateFile -ShouldExist $true
+    $resolved = [System.IO.Path]::GetFullPath((Join-Path $WorkspaceRoot $RelativePath))
+    Assert-FileExists -Path $resolved -Description $Description
+    return $resolved
+}
+
+function Invoke-External {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory = $repoRoot,
+        [string]$InputFile,
+        [int]$TimeoutMs = 0
+    )
+
+    $command = Format-Command -FilePath $FilePath -Arguments $Arguments
+    Write-Host $command -ForegroundColor DarkGray
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    foreach ($argument in $Arguments) {
+        [void]$psi.ArgumentList.Add([string]$argument)
+    }
+
+    $started = $false
+    $lastStartError = $null
+    $process = $null
+    foreach ($attempt in 1..5) {
+        try {
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $psi
+            [void]$process.Start()
+            $started = $true
+            break
+        } catch {
+            $lastStartError = $_
+            if ($null -ne $process) {
+                $process.Dispose()
+            }
+            $process = $null
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    if (-not $started) {
+        throw $lastStartError
+    }
+
+    if ($InputFile) {
+        $content = [System.IO.File]::ReadAllText($InputFile)
+        $process.StandardInput.Write($content)
+    }
+    $process.StandardInput.Close()
+
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    $timedOut = $false
+    if ($TimeoutMs -gt 0) {
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            $timedOut = $true
+            try {
+                $process.Kill($true)
+            } catch {
+            }
+        }
+    } else {
+        $process.WaitForExit()
+    }
+
+    $process.WaitForExit()
+    $stdoutTask.Wait()
+    $stderrTask.Wait()
+
+    return [pscustomobject]@{
+        Command  = $command
+        ExitCode = $process.ExitCode
+        TimedOut = $timedOut
+        Stdout   = $stdoutTask.Result
+        Stderr   = $stderrTask.Result
     }
 }
 
-function Test-WorkspaceStructure {
+function Invoke-InteractivePair {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ContestantFilePath,
+        [string[]]$ContestantArguments = @(),
+        [Parameter(Mandatory = $true)]
+        [string]$InteractorFilePath,
+        [string[]]$InteractorArguments = @(),
+        [string]$WorkingDirectory = $repoRoot,
+        [int]$TimeoutMs = 0
+    )
+
+    $contestantCommand = Format-Command -FilePath $ContestantFilePath -Arguments $ContestantArguments
+    $interactorCommand = Format-Command -FilePath $InteractorFilePath -Arguments $InteractorArguments
+    Write-Host $contestantCommand -ForegroundColor DarkGray
+    Write-Host $interactorCommand -ForegroundColor DarkGray
+
+    $python = $null
+    foreach ($candidate in @("python", "python3")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+            $python = $candidate
+            break
+        }
+    }
+    if (-not $python) {
+        throw "交互题本地联调需要 python 作为 broker，但当前环境未找到 python。"
+    }
+
+    $runnerPath = Join-Path $artifactRoot "interactive-runner.py"
+    $runnerLibPath = Join-Path $artifactRoot "interactlib.py"
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "templates/shared/interactlib.py") -Destination $runnerLibPath -Force
+    $runner = @'
+import json
+import subprocess
+import sys
+import threading
+from interactlib import write
+
+contestant_cmd = json.loads(sys.argv[1])
+interactor_cmd = json.loads(sys.argv[2])
+working_dir = sys.argv[3]
+timeout = float(sys.argv[4])
+
+contestant = subprocess.Popen(contestant_cmd, cwd=working_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+interactor = subprocess.Popen(interactor_cmd, cwd=working_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+def pump(src, dst_proc):
+    try:
+        for line in src:
+            write(dst_proc, line.rstrip("\n"), quiet=True)
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            dst_proc.stdin.close()
+        except Exception:
+            pass
+
+t1 = threading.Thread(target=pump, args=(contestant.stdout, interactor), daemon=True)
+t2 = threading.Thread(target=pump, args=(interactor.stdout, contestant), daemon=True)
+t1.start()
+t2.start()
+
+timed_out = False
+try:
+    contestant.wait(timeout=timeout)
+    interactor.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    timed_out = True
+    for proc in (contestant, interactor):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    contestant.wait()
+    interactor.wait()
+
+t1.join(timeout=1.0)
+t2.join(timeout=1.0)
+
+result = {
+    "contestantExitCode": contestant.returncode,
+    "interactorExitCode": interactor.returncode,
+    "contestantStderr": contestant.stderr.read(),
+    "interactorStderr": interactor.stderr.read(),
+    "timedOut": timed_out
+}
+print(json.dumps(result))
+'@
+    [System.IO.File]::WriteAllText($runnerPath, $runner, [System.Text.UTF8Encoding]::new($false))
+
+    $contestantList = @($ContestantFilePath) + $ContestantArguments
+    $interactorList = @($InteractorFilePath) + $InteractorArguments
+    $runnerResult = Invoke-External -FilePath $python -Arguments @($runnerPath, (ConvertTo-Json $contestantList -Compress), (ConvertTo-Json $interactorList -Compress), $WorkingDirectory, ([string]([Math]::Max($TimeoutMs, 1) / 1000.0))) -WorkingDirectory $repoRoot -TimeoutMs ([Math]::Max($TimeoutMs + 5000, 10000))
+    if ($runnerResult.ExitCode -ne 0) {
+        throw "交互 broker 执行失败：$($runnerResult.Stderr)"
+    }
+
+    $payload = $runnerResult.Stdout | ConvertFrom-Json
+    $verdict = "AC"
+    if ($payload.timedOut) {
+        $verdict = "TLE"
+    } elseif ($payload.contestantExitCode -ne 0) {
+        $verdict = "RE"
+    } elseif ($payload.interactorExitCode -ne 0) {
+        $verdict = "WA"
+    }
+
+    return [pscustomobject]@{
+        ContestantCommand  = $contestantCommand
+        InteractorCommand  = $interactorCommand
+        ContestantExitCode = [int]$payload.contestantExitCode
+        InteractorExitCode = [int]$payload.interactorExitCode
+        ContestantStderr   = [string]$payload.contestantStderr
+        InteractorStderr   = [string]$payload.interactorStderr
+        Verdict            = $verdict
+        TimedOut           = [bool]$payload.timedOut
+    }
+}
+
+function Find-PythonCommand {
+    param(
+        [hashtable]$BuildConfig
+    )
+
+    if ($BuildConfig.ContainsKey("pythonCommand")) {
+        return [string]$BuildConfig.pythonCommand
+    }
+
+    foreach ($candidate in @("python3", "python")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Expand-TemplateTokens {
+    param(
+        [string[]]$Template,
+        [hashtable]$Tokens
+    )
+
+    return ,@($Template | ForEach-Object {
+        $value = [string]$_
+        foreach ($key in $Tokens.Keys) {
+            $value = $value.Replace("{{${key}}}", [string]$Tokens[$key])
+        }
+        $value
+    })
+}
+
+function Read-ProblemConfig {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkspacePath
     )
 
-    Write-Log "[structure] $WorkspacePath"
+    $configPath = Join-Path $WorkspacePath "config.json"
+    Assert-FileExists -Path $configPath -Description "config.json"
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
 
-    Assert-DirectoryExists $WorkspacePath
-    Assert-DirectoryExists (Join-Path $WorkspacePath "include")
-    Assert-DirectoryExists (Join-Path $WorkspacePath "docs")
-    Assert-DirectoryExists (Join-Path $WorkspacePath "src")
-    Assert-DirectoryExists (Join-Path $WorkspacePath "testdata")
-
-    foreach ($relativePath in @(
-        "include/testlib.h",
-        "docs/statement.md",
-        "docs/solution.md",
-        "src/checker.cpp",
-        "src/validator.cpp",
-        "src/generator.cpp",
-        "src/solution.cpp",
-        "src/brute-force.cpp",
-        "src/wrong-sol.cpp"
-    )) {
-        Assert-FileExists (Join-Path $WorkspacePath $relativePath)
+    foreach ($required in @("slug", "title", "interactive", "timeLimitMs", "memoryLimitMb", "standard", "statement", "tutorial", "validator", "generator", "solutions")) {
+        if (-not $config.ContainsKey($required)) {
+            throw "config.json 缺少字段：$required"
+        }
+    }
+    if (-not $config.generator.ContainsKey("path") -or -not $config.generator.ContainsKey("cases")) {
+        throw "config.json 缺少 generator.path 或 generator.cases"
     }
 
-    $statement = Get-Content -LiteralPath (Join-Path $WorkspacePath "docs/statement.md") -Raw
-    $solutionDoc = Get-Content -LiteralPath (Join-Path $WorkspacePath "docs/solution.md") -Raw
-
-    if ($statement -notmatch '## 样例') {
-        throw "题面缺少样例章节：$WorkspacePath"
-    }
-    if ($statement -notmatch '```input1') {
-        throw "题面缺少 input1 样例块：$WorkspacePath"
-    }
-    if ([string]::IsNullOrWhiteSpace($solutionDoc)) {
-        throw "题解为空：$WorkspacePath"
+    $interactive = [bool]$config.interactive
+    if ($interactive) {
+        if (-not $config.ContainsKey("interactor")) {
+            throw "交互题必须声明 interactor"
+        }
+    } elseif (-not $config.ContainsKey("checker")) {
+        throw "普通题必须声明 checker"
     }
 
-    foreach ($relativePath in @(
-        "docs/statement.md",
-        "docs/solution.md",
-        "src/checker.cpp",
-        "src/validator.cpp",
-        "src/generator.cpp",
-        "src/solution.cpp",
-        "src/brute-force.cpp",
-        "src/wrong-sol.cpp"
-    )) {
-        Assert-MarkerPresence -Path (Join-Path $WorkspacePath $relativePath) -ShouldExist $false
-    }
-}
-
-function Get-BinaryPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDir,
-
-        [Parameter(Mandatory = $true)]
-        [string]$BaseName
-    )
-
-    return Join-Path $OutputDir "$BaseName.exe"
-}
-
-function Invoke-DirectBuild {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
-    )
-
-    $workspaceName = Split-Path -Leaf $WorkspacePath
-    $runToken = "{0:yyyyMMdd-HHmmss}-{1}" -f (Get-Date), $PID
-    $outputDir = Join-Path $artifactsRoot (Join-Path "build" "$workspaceName-$runToken")
-    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    $buildConfig = if ($config.ContainsKey("build")) { [hashtable]$config.build } else { @{} }
+    if (-not $buildConfig.ContainsKey("cppCompiler")) { $buildConfig.cppCompiler = "g++" }
+    if (-not $buildConfig.ContainsKey("cppFlags")) { $buildConfig.cppFlags = @("-std={{standard}}", "-O2", "-pipe") }
+    $pythonCommand = Find-PythonCommand -BuildConfig $buildConfig
 
     $includeDir = Join-Path $WorkspacePath "include"
-    $compileTargets = @(
-        @{ Source = "solution.cpp"; Name = "STD" },
-        @{ Source = "brute-force.cpp"; Name = "BF" },
-        @{ Source = "wrong-sol.cpp"; Name = "WA" },
-        @{ Source = "checker.cpp"; Name = "CHECKER" },
-        @{ Source = "validator.cpp"; Name = "VAL" },
-        @{ Source = "generator.cpp"; Name = "GEN" }
-    )
+    Assert-FileExists -Path (Join-Path $includeDir "testlib.h") -Description "include/testlib.h"
 
-    foreach ($target in $compileTargets) {
-        $sourcePath = Join-Path $WorkspacePath (Join-Path "src" $target.Source)
-        $outputPath = Get-BinaryPath -OutputDir $outputDir -BaseName $target.Name
-        $args = @(
-            "-std=c++20",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-I", $includeDir,
-            $sourcePath,
-            "-o", $outputPath
-        )
-        if ((Invoke-LoggedCommand -FilePath "g++" -ArgumentList $args -Description "g++ build $($target.Name): $WorkspacePath") -ne 0) {
-            throw "编译失败：$sourcePath"
+    $solutions = @($config.solutions | ForEach-Object {
+        [pscustomobject]@{
+            Name           = [string]$_.name
+            Path           = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$_.path) -Description "solution $($_.name)"
+            Language       = [string]$_.language
+            Role           = [string]$_.role
+            CompileCommand = ConvertTo-Array $(if ($_.ContainsKey("compileCommand")) { $_.compileCommand } else { $null })
+            RunCommand     = ConvertTo-Array $(if ($_.ContainsKey("runCommand")) { $_.runCommand } else { $null })
+            Groups         = ConvertTo-Array $(if ($_.ContainsKey("groups")) { $_.groups } else { $null })
+            Cases          = ConvertTo-Array $(if ($_.ContainsKey("cases")) { $_.cases } else { $null })
         }
+    })
+
+    $wrongSolutions = @()
+    if ($config.ContainsKey("wrongSolutions")) {
+        $wrongSolutions = @($config.wrongSolutions | ForEach-Object {
+            [pscustomobject]@{
+                Name           = [string]$_.name
+                Path           = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$_.path) -Description "wrong solution $($_.name)"
+                Language       = [string]$_.language
+                Expected       = [string]$_.expected
+                CompileCommand = ConvertTo-Array $(if ($_.ContainsKey("compileCommand")) { $_.compileCommand } else { $null })
+                RunCommand     = ConvertTo-Array $(if ($_.ContainsKey("runCommand")) { $_.runCommand } else { $null })
+                Groups         = ConvertTo-Array $(if ($_.ContainsKey("groups")) { $_.groups } else { $null })
+                Cases          = ConvertTo-Array $(if ($_.ContainsKey("cases")) { $_.cases } else { $null })
+            }
+        })
     }
 
-    return $outputDir
+    $mains = @($solutions | Where-Object { $_.Role -eq "main" })
+    if ($mains.Count -ne 1) {
+        throw "solutions 中必须且只能有一个 role=main"
+    }
+
+    $cases = @($config.generator.cases | ForEach-Object {
+        foreach ($requiredCaseKey in @("name", "type", "seed", "group")) {
+            if (-not $_.ContainsKey($requiredCaseKey)) {
+                throw "generator.cases 缺少字段：$requiredCaseKey"
+            }
+        }
+        [pscustomobject]@{
+            Name      = [string]$_.name
+            Type      = [string]$_.type
+            Seed      = [string]$_.seed
+            Group     = [string]$_.group
+            CheckWith = ConvertTo-Array $(if ($_.ContainsKey("checkWith")) { $_.checkWith } else { $null })
+        }
+    })
+
+    return [pscustomobject]@{
+        WorkspacePath         = $WorkspacePath
+        Slug                  = [string]$config.slug
+        Interactive           = $interactive
+        TimeLimitMs           = [int]$config.timeLimitMs
+        MemoryLimitMb         = [int]$config.memoryLimitMb
+        Standard              = [string]$config.standard
+        IncludeDir            = $includeDir
+        StatementPath         = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.statement) -Description "statement"
+        TutorialPath          = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.tutorial) -Description "tutorial"
+        ValidatorPath         = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.validator) -Description "validator"
+        GeneratorPath         = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.generator.path) -Description "generator"
+        CheckerPath           = if ($interactive) { $null } else { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.checker) -Description "checker" }
+        InteractorPath        = if ($interactive) { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.interactor) -Description "interactor" } else { $null }
+        InteractionAnswerPath = if ($config.ContainsKey("interactionAnswer")) { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.interactionAnswer) -Description "interactionAnswer" } else { $null }
+        BuildConfig           = $buildConfig
+        PythonCommand         = $pythonCommand
+        Solutions             = $solutions
+        WrongSolutions        = $wrongSolutions
+        Cases                 = $cases
+    }
 }
 
-function Invoke-ValidatorChecks {
+function New-BuildLayout {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkspacePath,
-
         [Parameter(Mandatory = $true)]
-        [string]$BuildDir
+        [string]$Slug
     )
 
-    $validator = Get-BinaryPath -OutputDir $BuildDir -BaseName "VAL"
-    $generator = Get-BinaryPath -OutputDir $BuildDir -BaseName "GEN"
-    $testdataFiles = Get-ChildItem -LiteralPath (Join-Path $WorkspacePath "testdata") -Filter "*.in" | Sort-Object Name
-
-    foreach ($testcase in $testdataFiles) {
-        Write-Log "START validator stdin: $($testcase.FullName)"
-        Write-Log "CMD   Get-Content $($testcase.FullName) | & $validator"
-        Get-Content -LiteralPath $testcase.FullName | & $validator | Out-Host
-        $exitCode = $LASTEXITCODE
-        Write-Log "END   validator stdin: $($testcase.FullName) (exit=$exitCode)"
-        if ($exitCode -ne 0) {
-            throw "validator 未通过：$($testcase.FullName)"
-        }
+    $buildRoot = Join-Path $artifactRoot (Join-Path "build" $Slug)
+    if (Test-Path -LiteralPath $buildRoot) {
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force
+    }
+    $binRoot = Join-Path $buildRoot "bin"
+    $generatedRoot = Join-Path $buildRoot "generated"
+    foreach ($directory in @($buildRoot, $binRoot, $generatedRoot)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
 
-    Write-Log "[generator->validator] $WorkspacePath"
-    $generated = & $generator 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "generator 执行失败：$WorkspacePath"
-    }
-
-    $tempInput = Join-Path $BuildDir "__generated.in"
-    [System.IO.File]::WriteAllText($tempInput, ($generated -join [Environment]::NewLine) + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-    Write-Log "START validator generated data: $WorkspacePath"
-    Write-Log "CMD   Get-Content $tempInput | & $validator"
-    Get-Content -LiteralPath $tempInput | & $validator | Out-Host
-    $exitCode = $LASTEXITCODE
-    Write-Log "END   validator generated data: $WorkspacePath (exit=$exitCode)"
-    if ($exitCode -ne 0) {
-        throw "generator 产出的数据未通过 validator：$WorkspacePath"
+    return [pscustomobject]@{
+        BuildRoot     = $buildRoot
+        BinRoot       = $binRoot
+        GeneratedRoot = $generatedRoot
     }
 }
 
-function Invoke-AnswerChecks {
+function Get-ExecutableExtension {
+    if ($script:IsWindowsHost) {
+        return ".exe"
+    }
+    return ""
+}
+
+function Compile-Cpp {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath,
-
+        [pscustomobject]$Problem,
         [Parameter(Mandatory = $true)]
-        [string]$BuildDir
+        [string]$SourcePath,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+        [string[]]$Override = @()
     )
 
-    $inputPath = Join-Path $WorkspacePath "testdata/1.in"
-    $answerPath = Join-Path $WorkspacePath "testdata/1.out"
-    if (-not (Test-Path -LiteralPath $answerPath)) {
-        return
+    $tokens = @{
+        source   = $SourcePath
+        output   = $OutputPath
+        include  = $Problem.IncludeDir
+        standard = $Problem.Standard
     }
 
-    $solution = Get-BinaryPath -OutputDir $BuildDir -BaseName "STD"
-    $checker = Get-BinaryPath -OutputDir $BuildDir -BaseName "CHECKER"
+    $overrideArgs = ConvertTo-Array $Override
+    if ($overrideArgs.Count -gt 0) {
+        $expanded = Expand-TemplateTokens -Template $overrideArgs -Tokens $tokens
+        $filePath = $expanded[0]
+        $arguments = if ($expanded.Count -gt 1) { @($expanded[1..($expanded.Count - 1)]) } else { @() }
+        return Invoke-External -FilePath $filePath -Arguments $arguments -WorkingDirectory $Problem.WorkspacePath
+    }
 
-    $actualOutputPath = Join-Path $BuildDir "__std.out"
-    Write-Log "[sample answer] $WorkspacePath"
-    Get-Content -LiteralPath $inputPath | & $solution | Set-Content -LiteralPath $actualOutputPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "标准程序执行失败：$WorkspacePath"
+    $args = Expand-TemplateTokens -Template (ConvertTo-Array $Problem.BuildConfig.cppFlags) -Tokens $tokens
+    $args += @("-I", $Problem.IncludeDir, $SourcePath, "-o", $OutputPath)
+    return Invoke-External -FilePath ([string]$Problem.BuildConfig.cppCompiler) -Arguments $args -WorkingDirectory $Problem.WorkspacePath
+}
+
+function Ensure-CompiledProgram {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Problem,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Entry,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+        return $true
     }
-    if ((Invoke-LoggedCommand -FilePath $checker -ArgumentList @($inputPath, $actualOutputPath, $answerPath) -Description "checker sample: $WorkspacePath") -ne 0) {
-        throw "标准程序与样例输出不匹配：$WorkspacePath"
+
+    Write-Stage -Stage "compile" -Message "$($Problem.Slug) recompiling $($Entry.Name) because artifact is missing"
+    $result = Compile-Cpp -Problem $Problem -SourcePath $Entry.Path -OutputPath $OutputPath -Override $Entry.CompileCommand
+    if ($result.TimedOut -or $result.ExitCode -ne 0) {
+        $message = "编译失败：$($Entry.Name)"
+        if ($result.Stderr) {
+            $message += "`n$($result.Stderr.Trim())"
+        }
+        Add-Failure -Workspace $Problem.Slug -Stage "compile" -Message $message -Command $result.Command
+        return $false
     }
+
+    foreach ($attempt in 1..20) {
+        if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 300
+    }
+
+    Add-Failure -Workspace $Problem.Slug -Stage "compile" -Message "编译命令返回成功，但产物不存在：$OutputPath" -Command $result.Command
+    return $false
+}
+
+function Get-Invocation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Problem,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Entry,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CompiledPrograms
+    )
+
+    if ($Entry.Language -eq "cpp") {
+        return [pscustomobject]@{
+            FilePath  = [string]$CompiledPrograms[$Entry.Name]
+            Arguments = @()
+        }
+    }
+
+    if ($Entry.Language -eq "python") {
+        if (-not $Problem.PythonCommand) {
+            throw "存在 Python 方案，但未找到可用 python 解释器"
+        }
+        if ($Entry.RunCommand.Count -gt 0) {
+            $expanded = Expand-TemplateTokens -Template $Entry.RunCommand -Tokens @{ path = $Entry.Path }
+            return [pscustomobject]@{
+                FilePath  = $expanded[0]
+                Arguments = if ($expanded.Count -gt 1) { @($expanded[1..($expanded.Count - 1)]) } else { @() }
+            }
+        }
+        return [pscustomobject]@{
+            FilePath  = $Problem.PythonCommand
+            Arguments = @($Entry.Path)
+        }
+    }
+
+    throw "不支持的语言：$($Entry.Language)"
+}
+
+function Test-CaseMatchesEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Case,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Entry
+    )
+
+    if ($Entry.Cases.Count -gt 0 -and $Case.Name -notin $Entry.Cases) {
+        return $false
+    }
+    if ($Entry.Groups.Count -gt 0 -and $Case.Group -notin $Entry.Groups) {
+        return $false
+    }
+    return $true
 }
 
 function Test-OneWorkspace {
@@ -322,54 +655,335 @@ function Test-OneWorkspace {
         [string]$WorkspacePath
     )
 
-    Test-WorkspaceStructure -WorkspacePath $WorkspacePath
-    $buildDir = Invoke-DirectBuild -WorkspacePath $WorkspacePath
-    Invoke-ValidatorChecks -WorkspacePath $WorkspacePath -BuildDir $buildDir
-    Invoke-AnswerChecks -WorkspacePath $WorkspacePath -BuildDir $buildDir
-}
+    $problem = $null
+    try {
+        $problem = Read-ProblemConfig -WorkspacePath $WorkspacePath
+    } catch {
+        Add-Failure -Workspace (Split-Path -Leaf $WorkspacePath) -Stage "config" -Message $_.Exception.Message
+        return
+    }
 
-function Invoke-SmokeTest {
-    $smokeNames = @(
-        @{ Name = "codex-smoke-standard"; Interactive = $false },
-        @{ Name = "codex-smoke-interactive"; Interactive = $true }
+    Write-Stage -Stage "workspace" -Message "$($problem.Slug) ($WorkspacePath)"
+    Write-Stage -Stage "info" -Message "memoryLimitMb=$($problem.MemoryLimitMb) 当前仅作为记录字段。"
+
+    $layout = New-BuildLayout -WorkspacePath $WorkspacePath -Slug $problem.Slug
+    $compiledPrograms = @{}
+    $compileFailed = $false
+    $extension = Get-ExecutableExtension
+
+    $compileEntries = @(
+        [pscustomobject]@{ Name = "input-tool"; OutputName = "validator"; Path = $problem.ValidatorPath; CompileCommand = @() },
+        [pscustomobject]@{ Name = "gen-tool"; OutputName = "generator"; Path = $problem.GeneratorPath; CompileCommand = @() }
     )
+    if ($problem.Interactive) {
+        $compileEntries += [pscustomobject]@{ Name = "judge-tool"; OutputName = "interactor"; Path = $problem.InteractorPath; CompileCommand = @() }
+    } else {
+        $compileEntries += [pscustomobject]@{ Name = "judge-tool"; OutputName = "checker"; Path = $problem.CheckerPath; CompileCommand = @() }
+    }
+    $compileEntries += @($problem.Solutions + $problem.WrongSolutions)
+    $compileEntryByName = @{}
+    foreach ($entry in $compileEntries) {
+        $compileEntryByName[$entry.Name] = $entry
+    }
 
-    foreach ($item in $smokeNames) {
-        $workspacePath = Join-Path $examplesRoot $item.Name
-        if (Test-Path -LiteralPath $workspacePath) {
-            Remove-Item -LiteralPath $workspacePath -Recurse -Force
+    Write-Stage -Stage "compile" -Message $problem.Slug
+    foreach ($entry in $compileEntries) {
+        if ($entry.PSObject.Properties.Name -contains "Language" -and $entry.Language -eq "python") {
+            if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) {
+                Add-Failure -Workspace $problem.Slug -Stage "compile" -Message "Python 文件不存在：$($entry.Path)"
+                $compileFailed = $true
+                continue
+            }
+            if (-not $problem.PythonCommand) {
+                Add-Failure -Workspace $problem.Slug -Stage "compile" -Message "未找到 python 解释器：$($entry.Name)"
+                $compileFailed = $true
+                continue
+            }
+            $versionResult = Invoke-External -FilePath $problem.PythonCommand -Arguments @("--version") -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+            if ($versionResult.ExitCode -ne 0) {
+                Add-Failure -Workspace $problem.Slug -Stage "compile" -Message "python 不可用：$($entry.Name)`n$($versionResult.Stderr)" -Command $versionResult.Command
+                $compileFailed = $true
+            }
+            continue
         }
 
-        try {
-            Write-Log "[smoke:create] $($item.Name)"
-            if ($item.Interactive) {
-                & (Join-Path $PSScriptRoot "create-workspace.ps1") -Name $item.Name -Interactive | Out-Host
-            } else {
-                & (Join-Path $PSScriptRoot "create-workspace.ps1") -Name $item.Name | Out-Host
+        $outputBaseName = if ($entry.PSObject.Properties.Name -contains "OutputName" -and -not [string]::IsNullOrWhiteSpace([string]$entry.OutputName)) {
+            [string]$entry.OutputName
+        } else {
+            [string]$entry.Name
+        }
+        $outputPath = Join-Path $layout.BinRoot ($outputBaseName + $extension)
+        $result = Compile-Cpp -Problem $problem -SourcePath $entry.Path -OutputPath $outputPath -Override $entry.CompileCommand
+        if ($result.TimedOut -or $result.ExitCode -ne 0) {
+            $message = "编译失败：$($entry.Name)"
+            if ($result.Stderr) {
+                $message += "`n$($result.Stderr.Trim())"
             }
-            if ($LASTEXITCODE -ne 0) {
-                throw "create-workspace 失败：$($item.Name)"
+            Add-Failure -Workspace $problem.Slug -Stage "compile" -Message $message -Command $result.Command
+            $compileFailed = $true
+            continue
+        }
+        $exists = $false
+        foreach ($attempt in 1..20) {
+            if (Test-Path -LiteralPath $outputPath -PathType Leaf) {
+                $exists = $true
+                break
+            }
+            Start-Sleep -Milliseconds 300
+        }
+        if (-not $exists) {
+            Add-Failure -Workspace $problem.Slug -Stage "compile" -Message "编译命令返回成功，但产物不存在：$outputPath" -Command $result.Command
+            $compileFailed = $true
+            continue
+        }
+        $compiledPrograms[$entry.Name] = $outputPath
+    }
+
+    if ($compileFailed) {
+        return
+    }
+
+    $validatorPath = [string]$compiledPrograms["input-tool"]
+    $generatorPath = [string]$compiledPrograms["gen-tool"]
+    $judgePath = [string]$compiledPrograms["judge-tool"]
+    $timeoutMs = [Math]::Max($problem.TimeLimitMs * 3, $problem.TimeLimitMs + 1000)
+    $generatedCases = [System.Collections.Generic.List[object]]::new()
+
+    Write-Stage -Stage "generate" -Message $problem.Slug
+    if (-not (Ensure-CompiledProgram -Problem $problem -Entry $compileEntryByName["gen-tool"] -OutputPath $generatorPath)) {
+        return
+    }
+    foreach ($caseItem in $problem.Cases) {
+        $groupDir = Join-Path $layout.GeneratedRoot $caseItem.Group
+        New-Item -ItemType Directory -Path $groupDir -Force | Out-Null
+        $inputPath = Join-Path $groupDir ($caseItem.Name + ".in")
+        $generateResult = Invoke-External -FilePath $generatorPath -Arguments @($caseItem.Type, [string]$caseItem.Seed) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+        if ($generateResult.TimedOut -or $generateResult.ExitCode -ne 0) {
+            $message = "generator 失败：case=$($caseItem.Name)"
+            if ($generateResult.Stderr) {
+                $message += "`n$($generateResult.Stderr.Trim())"
+            }
+            Add-Failure -Workspace $problem.Slug -Stage "generate" -Message $message -Command $generateResult.Command
+            continue
+        }
+        [System.IO.File]::WriteAllText($inputPath, $generateResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+        $generatedCases.Add([pscustomobject]@{
+            Name        = $caseItem.Name
+            Type        = $caseItem.Type
+            Seed        = $caseItem.Seed
+            Group       = $caseItem.Group
+            InputPath   = $inputPath
+            AnswerPath  = Join-Path $groupDir ($caseItem.Name + ".ans")
+            MainOutPath = Join-Path $groupDir ($caseItem.Name + ".main.out")
+            CheckWith   = $caseItem.CheckWith
+        }) | Out-Null
+    }
+
+    if ($generatedCases.Count -eq 0) {
+        Add-Failure -Workspace $problem.Slug -Stage "generate" -Message "没有任何成功生成的测试点。"
+        return
+    }
+
+    Write-Stage -Stage "validate" -Message $problem.Slug
+    $validatorEntry = $compileEntryByName["input-tool"]
+    foreach ($caseInfo in $generatedCases) {
+        $caseValidatorPath = Join-Path $layout.BinRoot ("validator-" + $caseInfo.Name + $extension)
+        $validatorCompileResult = Compile-Cpp -Problem $problem -SourcePath $validatorEntry.Path -OutputPath $caseValidatorPath -Override $validatorEntry.CompileCommand
+        if ($validatorCompileResult.TimedOut -or $validatorCompileResult.ExitCode -ne 0) {
+            $message = "validator 编译失败：case=$($caseInfo.Name)"
+            if ($validatorCompileResult.Stderr) {
+                $message += "`n$($validatorCompileResult.Stderr.Trim())"
+            }
+            Add-Failure -Workspace $problem.Slug -Stage "validate" -Message $message -Command $validatorCompileResult.Command
+            continue
+        }
+        if ($script:IsWindowsHost) {
+            $cmdPath = Join-Path $layout.BinRoot ("validator-" + $caseInfo.Name + ".cmd")
+            $cmdContent = @(
+                "@echo off"
+                'type "' + $caseInfo.InputPath + '" | "' + $caseValidatorPath + '"'
+                "exit /b %errorlevel%"
+            ) -join "`r`n"
+            [System.IO.File]::WriteAllText($cmdPath, $cmdContent, [System.Text.ASCIIEncoding]::new())
+            $validatorResult = Invoke-External -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+        } else {
+            $validatorResult = Invoke-External -FilePath $caseValidatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs 10000
+        }
+        if ($validatorResult.TimedOut -or $validatorResult.ExitCode -ne 0) {
+            $message = "validator 失败：case=$($caseInfo.Name), input=$($caseInfo.InputPath), exit=$($validatorResult.ExitCode)"
+            if ($validatorResult.Stderr) {
+                $message += "`n$($validatorResult.Stderr.Trim())"
+            }
+            Add-Failure -Workspace $problem.Slug -Stage "validate" -Message $message -Command $validatorResult.Command
+        }
+    }
+
+    $mainSolution = @($problem.Solutions | Where-Object { $_.Role -eq "main" })[0]
+    $mainInvocation = Get-Invocation -Problem $problem -Entry $mainSolution -CompiledPrograms $compiledPrograms
+
+    if (-not $problem.Interactive) {
+        Write-Stage -Stage "run-main" -Message $problem.Slug
+        foreach ($caseInfo in $generatedCases) {
+            $mainResult = Invoke-External -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
+            if ($mainResult.TimedOut -or $mainResult.ExitCode -ne 0) {
+                $message = "主解失败：case=$($caseInfo.Name)"
+                if ($mainResult.TimedOut) { $message += " (TLE)" }
+                if ($mainResult.Stderr) { $message += "`n$($mainResult.Stderr.Trim())" }
+                Add-Failure -Workspace $problem.Slug -Stage "run-main" -Message $message -Command $mainResult.Command
+                continue
             }
 
-            Test-OneWorkspace -WorkspacePath $workspacePath
-        } finally {
-            if (Test-Path -LiteralPath $workspacePath) {
-                Remove-Item -LiteralPath $workspacePath -Recurse -Force
+            [System.IO.File]::WriteAllText($caseInfo.MainOutPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($caseInfo.AnswerPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+
+            $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $caseInfo.MainOutPath, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+            if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
+                $message = "checker 未接受主解输出：case=$($caseInfo.Name)"
+                if ($judgeResult.Stderr) { $message += "`n$($judgeResult.Stderr.Trim())" }
+                Add-Failure -Workspace $problem.Slug -Stage "run-main" -Message $message -Command $judgeResult.Command
+            }
+        }
+
+        $referenceSolutions = @($problem.Solutions | Where-Object { $_.Role -eq "reference" })
+        Write-Stage -Stage "check-reference" -Message $problem.Slug
+        foreach ($reference in $referenceSolutions) {
+            $referenceInvocation = Get-Invocation -Problem $problem -Entry $reference -CompiledPrograms $compiledPrograms
+            foreach ($caseInfo in $generatedCases) {
+                if ($caseInfo.CheckWith.Count -gt 0 -and $reference.Name -notin $caseInfo.CheckWith) { continue }
+                if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
+
+                $referenceOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $reference.Name + ".out")
+                $referenceResult = Invoke-External -FilePath $referenceInvocation.FilePath -Arguments $referenceInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
+                if ($referenceResult.TimedOut -or $referenceResult.ExitCode -ne 0) {
+                    $message = "参考解失败：solution=$($reference.Name), case=$($caseInfo.Name)"
+                    if ($referenceResult.TimedOut) { $message += " (TLE)" }
+                    if ($referenceResult.Stderr) { $message += "`n$($referenceResult.Stderr.Trim())" }
+                    Add-Failure -Workspace $problem.Slug -Stage "check-reference" -Message $message -Command $referenceResult.Command
+                    continue
+                }
+
+                [System.IO.File]::WriteAllText($referenceOut, $referenceResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+                $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $referenceOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+                if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
+                    $message = "参考解未通过 checker：solution=$($reference.Name), case=$($caseInfo.Name)"
+                    if ($judgeResult.Stderr) { $message += "`n$($judgeResult.Stderr.Trim())" }
+                    Add-Failure -Workspace $problem.Slug -Stage "check-reference" -Message $message -Command $judgeResult.Command
+                }
+            }
+        }
+
+        Write-Stage -Stage "check-wrong" -Message $problem.Slug
+        foreach ($wrong in $problem.WrongSolutions) {
+            $wrongInvocation = Get-Invocation -Problem $problem -Entry $wrong -CompiledPrograms $compiledPrograms
+            $testedCases = 0
+            $failedCases = 0
+            foreach ($caseInfo in $generatedCases) {
+                if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
+                $testedCases += 1
+                $wrongOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".out")
+                $wrongResult = Invoke-External -FilePath $wrongInvocation.FilePath -Arguments $wrongInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
+                if ($wrongResult.TimedOut -or $wrongResult.ExitCode -ne 0) {
+                    $failedCases += 1
+                    continue
+                }
+                [System.IO.File]::WriteAllText($wrongOut, $wrongResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+                $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $wrongOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+                if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
+                    $failedCases += 1
+                }
+            }
+
+            if ($testedCases -eq 0) {
+                Add-Failure -Workspace $problem.Slug -Stage "check-wrong" -Message "错解未匹配到任何测试点：$($wrong.Name)"
+            } elseif ($wrong.Expected -eq "fail" -and $failedCases -eq 0) {
+                Add-Failure -Workspace $problem.Slug -Stage "check-wrong" -Message "错解在所有测试点上都通过了：$($wrong.Name)"
+            }
+        }
+    } else {
+        Write-Stage -Stage "run-main" -Message $problem.Slug
+        foreach ($caseInfo in $generatedCases) {
+            $transcriptPath = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + ".interactor.out")
+            $judgeArgs = @($caseInfo.InputPath, $transcriptPath)
+            if ($problem.InteractionAnswerPath) {
+                $judgeArgs += $problem.InteractionAnswerPath
+            }
+            $mainResult = Invoke-InteractivePair -ContestantFilePath $mainInvocation.FilePath -ContestantArguments $mainInvocation.Arguments -InteractorFilePath $judgePath -InteractorArguments $judgeArgs -WorkingDirectory $problem.WorkspacePath -TimeoutMs $timeoutMs
+            if ($mainResult.Verdict -ne "AC") {
+                $message = "主解未通过交互：case=$($caseInfo.Name), verdict=$($mainResult.Verdict)"
+                if ($mainResult.ContestantStderr) { $message += "`ncontestant stderr:`n$($mainResult.ContestantStderr.Trim())" }
+                if ($mainResult.InteractorStderr) { $message += "`ninteractor stderr:`n$($mainResult.InteractorStderr.Trim())" }
+                Add-Failure -Workspace $problem.Slug -Stage "run-main" -Message $message -Command ($mainResult.ContestantCommand + " <-> " + $mainResult.InteractorCommand)
+            }
+        }
+
+        $referenceSolutions = @($problem.Solutions | Where-Object { $_.Role -eq "reference" })
+        Write-Stage -Stage "check-reference" -Message $problem.Slug
+        foreach ($reference in $referenceSolutions) {
+            $referenceInvocation = Get-Invocation -Problem $problem -Entry $reference -CompiledPrograms $compiledPrograms
+            foreach ($caseInfo in $generatedCases) {
+                if ($caseInfo.CheckWith.Count -gt 0 -and $reference.Name -notin $caseInfo.CheckWith) { continue }
+                if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
+
+                $transcriptPath = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $reference.Name + ".interactor.out")
+                $judgeArgs = @($caseInfo.InputPath, $transcriptPath)
+                if ($problem.InteractionAnswerPath) {
+                    $judgeArgs += $problem.InteractionAnswerPath
+                }
+                $referenceResult = Invoke-InteractivePair -ContestantFilePath $referenceInvocation.FilePath -ContestantArguments $referenceInvocation.Arguments -InteractorFilePath $judgePath -InteractorArguments $judgeArgs -WorkingDirectory $problem.WorkspacePath -TimeoutMs $timeoutMs
+                if ($referenceResult.Verdict -ne "AC") {
+                    $message = "参考解未通过交互：solution=$($reference.Name), case=$($caseInfo.Name), verdict=$($referenceResult.Verdict)"
+                    if ($referenceResult.ContestantStderr) { $message += "`ncontestant stderr:`n$($referenceResult.ContestantStderr.Trim())" }
+                    if ($referenceResult.InteractorStderr) { $message += "`ninteractor stderr:`n$($referenceResult.InteractorStderr.Trim())" }
+                    Add-Failure -Workspace $problem.Slug -Stage "check-reference" -Message $message -Command ($referenceResult.ContestantCommand + " <-> " + $referenceResult.InteractorCommand)
+                }
+            }
+        }
+
+        Write-Stage -Stage "check-wrong" -Message $problem.Slug
+        foreach ($wrong in $problem.WrongSolutions) {
+            $wrongInvocation = Get-Invocation -Problem $problem -Entry $wrong -CompiledPrograms $compiledPrograms
+            $testedCases = 0
+            $failedCases = 0
+            foreach ($caseInfo in $generatedCases) {
+                if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
+                $testedCases += 1
+                $transcriptPath = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".interactor.out")
+                $judgeArgs = @($caseInfo.InputPath, $transcriptPath)
+                if ($problem.InteractionAnswerPath) {
+                    $judgeArgs += $problem.InteractionAnswerPath
+                }
+                $wrongResult = Invoke-InteractivePair -ContestantFilePath $wrongInvocation.FilePath -ContestantArguments $wrongInvocation.Arguments -InteractorFilePath $judgePath -InteractorArguments $judgeArgs -WorkingDirectory $problem.WorkspacePath -TimeoutMs $timeoutMs
+                if ($wrongResult.Verdict -ne "AC") {
+                    $failedCases += 1
+                }
+            }
+
+            if ($testedCases -eq 0) {
+                Add-Failure -Workspace $problem.Slug -Stage "check-wrong" -Message "错解未匹配到任何测试点：$($wrong.Name)"
+            } elseif ($wrong.Expected -eq "fail" -and $failedCases -eq 0) {
+                Add-Failure -Workspace $problem.Slug -Stage "check-wrong" -Message "错解在所有测试点上都通过了：$($wrong.Name)"
             }
         }
     }
+
+    Write-Stage -Stage "success" -Message "$($problem.Slug) passed $($generatedCases.Count) cases."
 }
 
-Test-TemplateMarkers
 $workspaceList = Resolve-WorkspaceList -Requested $Workspace
 foreach ($workspacePath in $workspaceList) {
-    Write-Log "[workspace] $workspacePath"
     Test-OneWorkspace -WorkspacePath $workspacePath
 }
 
-if (-not $SkipSmokeTest) {
-    Write-Log "[smoke] enabled"
-    Invoke-SmokeTest
+if ($script:Failures.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Failures:" -ForegroundColor Red
+    foreach ($failure in $script:Failures) {
+        Write-Host "- [$($failure.Workspace)] [$($failure.Stage)] $($failure.Message)"
+        if ($failure.Command) {
+            Write-Host "  repro: $($failure.Command)"
+        }
+    }
+    exit 1
 }
 
-Write-Log "All tests passed."
+Write-Host "All tests passed."

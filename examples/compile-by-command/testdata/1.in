@@ -1,4 +1,0 @@
-3
-g++ foo.cc
-g++ -O2 -Wall -Wextra -std=c++11 foo.cc -owoshinailong.out
-g++ qaq.cpp -oqwq.exe -Ofast -std=gnu++23

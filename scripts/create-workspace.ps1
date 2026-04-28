@@ -1,22 +1,5 @@
 #!/usr/bin/env pwsh
 
-<#
-.SYNOPSIS
-创建一个 ICPC 题目工作区脚手架。
-
-.PARAMETER Name
-工作区名称。默认会在 examples/<Name> 下创建。
-
-.PARAMETER Interactive
-是否创建交互题脚手架。
-
-.EXAMPLE
-./scripts/create-workspace.ps1 -Name "add-and-sum"
-
-.EXAMPLE
-./scripts/create-workspace.ps1 -Name "magic-and-crab" -Interactive
-#>
-
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -28,7 +11,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$exampleMarkerToken = "CODEX_EXAMPLE_MARKER:"
 
 function Get-TemplateContent {
     param(
@@ -43,7 +25,6 @@ function Write-Utf8File {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
-
         [Parameter(Mandatory = $true)]
         [string]$Content
     )
@@ -52,8 +33,22 @@ function Write-Utf8File {
     if (-not [string]::IsNullOrWhiteSpace($directory)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Expand-Template {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Content,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Replacements
+    )
+
+    $expanded = $Content
+    foreach ($pair in $Replacements.GetEnumerator()) {
+        $expanded = $expanded.Replace($pair.Key, $pair.Value)
+    }
+    return $expanded
 }
 
 if ($Name.IndexOfAny([char[]]@('/', '\')) -ge 0) {
@@ -66,45 +61,8 @@ if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $workspacePath = Join-Path $repoRoot (Join-Path "examples" $Name)
-
 if (Test-Path -LiteralPath $workspacePath) {
     throw "目标工作区已存在：$workspacePath"
-}
-
-$templateMap = @{
-    Testlib           = Join-Path $PSScriptRoot "testlib.h"
-    Checker           = Join-Path $PSScriptRoot "checker-template.cpp"
-    InteractiveChecker = Join-Path $PSScriptRoot "interactive-checker-template.cpp"
-    Validator         = Join-Path $PSScriptRoot "validator-template.cpp"
-    InteractiveValidator = Join-Path $PSScriptRoot "interactive-validator-template.cpp"
-    Generator         = Join-Path $PSScriptRoot "generator-template.cpp"
-    Statement         = Join-Path $PSScriptRoot "statement-template.md"
-    InteractiveStatement = Join-Path $PSScriptRoot "interactive-statement-template.md"
-    SolutionDoc       = Join-Path $PSScriptRoot "solution-template.md"
-    Solution          = Join-Path $PSScriptRoot "solution-template.cpp"
-    BruteForce        = Join-Path $PSScriptRoot "brute-force-template.cpp"
-    WrongSol          = Join-Path $PSScriptRoot "wrong-sol-template.cpp"
-    InteractiveSolution = Join-Path $PSScriptRoot "interactive-solution-template.cpp"
-    InteractiveBruteForce = Join-Path $PSScriptRoot "interactive-brute-force-template.cpp"
-    InteractiveWrongSol = Join-Path $PSScriptRoot "interactive-wrong-sol-template.cpp"
-}
-
-foreach ($entry in $templateMap.GetEnumerator()) {
-    if (-not (Test-Path -LiteralPath $entry.Value)) {
-        throw "缺少模板文件：$($entry.Value)"
-    }
-}
-
-$directories = @(
-    $workspacePath,
-    (Join-Path $workspacePath "include"),
-    (Join-Path $workspacePath "docs"),
-    (Join-Path $workspacePath "src"),
-    (Join-Path $workspacePath "testdata")
-)
-
-foreach ($directory in $directories) {
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
 $problemTitle = ($Name -split '[-_.]') | Where-Object { $_ } | ForEach-Object {
@@ -121,57 +79,66 @@ $replacements = @{
     "{{PROBLEM_TITLE}}" = $problemTitle
 }
 
-function Expand-Template {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Content
-    )
+$templateRoot = Join-Path $PSScriptRoot "templates"
+$templateFlavorRoot = if ($Interactive) {
+    Join-Path $templateRoot "interactive"
+} else {
+    Join-Path $templateRoot "standard"
+}
+$sharedTemplateRoot = Join-Path $templateRoot "shared"
 
-    $expanded = $Content.Replace("名称", $Name)
-    foreach ($pair in $replacements.GetEnumerator()) {
-        $expanded = $expanded.Replace($pair.Key, $pair.Value)
-    }
-    return $expanded
+$templateMap = @{
+    Testlib         = Join-Path $sharedTemplateRoot "testlib.h"
+    InteractLib     = Join-Path $sharedTemplateRoot "interactlib.py"
+    Config          = Join-Path $templateFlavorRoot "config.json"
+    Statement       = Join-Path $templateFlavorRoot "statement.md"
+    Tutorial        = Join-Path $templateFlavorRoot "tutorial.md"
+    WorkspaceReadme = Join-Path $templateFlavorRoot "readme.md"
+    Generator       = Join-Path $templateFlavorRoot "generator.cpp"
+    Validator       = Join-Path $templateFlavorRoot "validator.cpp"
+    Judge           = Join-Path $templateFlavorRoot $(if ($Interactive) { "interactor.cpp" } else { "checker.cpp" })
+    Solution        = Join-Path $templateFlavorRoot "solution.cpp"
+    Solution2       = Join-Path $templateFlavorRoot "solution2.cpp"
+    PythonSolution  = Join-Path $templateFlavorRoot "solution.py"
+    WrongA          = Join-Path $templateFlavorRoot "wrong-a.cpp"
+    WrongB          = Join-Path $templateFlavorRoot "wrong-b.cpp"
 }
 
-function Strip-ExampleMarker {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Content
-    )
-
-    $lines = $Content -split "`r?`n"
-    $filtered = foreach ($line in $lines) {
-        if ($line -notmatch [regex]::Escape($exampleMarkerToken)) {
-            $line
-        }
+foreach ($templatePath in $templateMap.Values) {
+    if (-not (Test-Path -LiteralPath $templatePath)) {
+        throw "缺少模板文件：$templatePath"
     }
-    return ($filtered -join "`n").TrimEnd() + "`n"
+}
+
+$directories = @(
+    $workspacePath,
+    (Join-Path $workspacePath "include"),
+    (Join-Path $workspacePath "docs"),
+    (Join-Path $workspacePath "src"),
+    (Join-Path $workspacePath "src/generator"),
+    (Join-Path $workspacePath "src/validator"),
+    (Join-Path $workspacePath "src/checker"),
+    (Join-Path $workspacePath "src/wrong")
+)
+foreach ($directory in $directories) {
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
 Copy-Item -LiteralPath $templateMap.Testlib -Destination (Join-Path $workspacePath "include/testlib.h")
-
-$statementTemplate = if ($Interactive) { $templateMap.InteractiveStatement } else { $templateMap.Statement }
-$checkerTemplate = if ($Interactive) { $templateMap.InteractiveChecker } else { $templateMap.Checker }
-$validatorTemplate = if ($Interactive) { $templateMap.InteractiveValidator } else { $templateMap.Validator }
-$solutionTemplate = if ($Interactive) { $templateMap.InteractiveSolution } else { $templateMap.Solution }
-$bruteForceTemplate = if ($Interactive) { $templateMap.InteractiveBruteForce } else { $templateMap.BruteForce }
-$wrongSolTemplate = if ($Interactive) { $templateMap.InteractiveWrongSol } else { $templateMap.WrongSol }
-
-Write-Utf8File -Path (Join-Path $workspacePath "docs/statement.md") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $statementTemplate)))
-Write-Utf8File -Path (Join-Path $workspacePath "docs/solution.md") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $templateMap.SolutionDoc)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/checker.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $checkerTemplate)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/validator.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $validatorTemplate)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/generator.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $templateMap.Generator)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/solution.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $solutionTemplate)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/brute-force.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $bruteForceTemplate)))
-Write-Utf8File -Path (Join-Path $workspacePath "src/wrong-sol.cpp") -Content (Strip-ExampleMarker (Expand-Template (Get-TemplateContent $wrongSolTemplate)))
-
 if ($Interactive) {
-    Write-Utf8File -Path (Join-Path $workspacePath "testdata/1.in") -Content "42`n"
-} else {
-    Write-Utf8File -Path (Join-Path $workspacePath "testdata/1.in") -Content "5`n"
-    Write-Utf8File -Path (Join-Path $workspacePath "testdata/1.out") -Content "5`n"
+    Copy-Item -LiteralPath $templateMap.InteractLib -Destination (Join-Path $workspacePath "interactlib.py")
 }
+Write-Utf8File -Path (Join-Path $workspacePath "config.json") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Config) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "docs/statement.md") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Statement) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "docs/tutorial.md") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Tutorial) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "readme.md") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.WorkspaceReadme) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/generator/generator.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Generator) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/validator/validator.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Validator) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath ("src/checker/" + $(if ($Interactive) { "interactor.cpp" } else { "checker.cpp" }))) -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Judge) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/solution.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Solution) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/solution2.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.Solution2) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/solution.py") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.PythonSolution) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/wrong/wrong-a.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.WrongA) -Replacements $replacements)
+Write-Utf8File -Path (Join-Path $workspacePath "src/wrong/wrong-b.cpp") -Content (Expand-Template -Content (Get-TemplateContent $templateMap.WrongB) -Replacements $replacements)
 
 Write-Host "Workspace created at $workspacePath"

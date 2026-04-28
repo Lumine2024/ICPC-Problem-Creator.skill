@@ -1,0 +1,36 @@
+{
+  "slug": "{{PROBLEM_NAME}}",
+  "title": "{{PROBLEM_TITLE}}",
+  "interactive": true,
+  "timeLimitMs": 2000,
+  "memoryLimitMb": 1024,
+  "standard": "gnu++20",
+  "statement": "docs/statement.md",
+  "tutorial": "docs/tutorial.md",
+  "validator": "src/validator/validator.cpp",
+  "generator": {
+    "path": "src/generator/generator.cpp",
+    "cases": [
+      { "name": "sample-1", "type": "sample", "seed": 1, "group": "sample" },
+      { "name": "min-1", "type": "min", "seed": 1, "group": "secret" },
+      { "name": "random-small-1", "type": "random-small", "seed": 3, "group": "secret", "checkWith": ["solution2", "python"] },
+      { "name": "random-large-1", "type": "random-large", "seed": 5, "group": "secret" },
+      { "name": "max-1", "type": "max", "seed": 7, "group": "secret" }
+    ]
+  },
+  "interactor": "src/checker/interactor.cpp",
+  "build": {
+    "cppCompiler": "g++",
+    "cppFlags": ["-std={{standard}}", "-O2", "-pipe"],
+    "pythonCommand": "python"
+  },
+  "solutions": [
+    { "name": "main", "path": "src/solution.cpp", "language": "cpp", "role": "main" },
+    { "name": "solution2", "path": "src/solution2.cpp", "language": "cpp", "role": "reference" },
+    { "name": "python", "path": "src/solution.py", "language": "python", "role": "reference" }
+  ],
+  "wrongSolutions": [
+    { "name": "wrong-a", "path": "src/wrong/wrong-a.cpp", "language": "cpp", "expected": "fail" },
+    { "name": "wrong-b", "path": "src/wrong/wrong-b.cpp", "language": "cpp", "expected": "fail" }
+  ]
+}

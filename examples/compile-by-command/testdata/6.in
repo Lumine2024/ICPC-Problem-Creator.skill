@@ -1,7 +1,0 @@
-6
-   g++         -WWRONG_ANSWER       -WTIME_LIMIT_EXCEEDED      -WRUNTIME_ERROR -WCOMPILE_ERROR        -WMEMORY_LIMIT_EXCEEDED    a.cpp -std=c++100
-g++    src/main.cpp      -O114514          -W1919810      -W314159265
-g++   a    -ob
-g++      diaoman.cpp -odiaowoman
-         g++ oxyaneoh2.cpp -owater           
-g++       xkerror.cpp       -obieyaowoQAQ                     
