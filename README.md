@@ -87,7 +87,16 @@
 ```powershell
 ./scripts/run-all-tests.ps1
 ./scripts/run-all-tests.ps1 -Workspace "examples/example-problem"
+./scripts/export-testdata.ps1 -Workspace "examples/example-problem"
 ```
+
+如果目标 OJ 不支持本地 `generator`，可以再执行一次：
+
+```powershell
+./scripts/export-testdata.ps1 -Workspace "examples/example-problem"
+```
+
+它会根据 `config.json` 编译 `generator + validator + main solution`，导出静态的 `.in/.ans` 文件到题目目录下的 `exported-tests/`。
 
 ### 使用 AI Agent 自动造题
 
@@ -113,6 +122,7 @@ npx skills add .
 
 - `scripts/create-workspace.ps1`：创建新的题目工作区。
 - `scripts/run-all-tests.ps1`：统一执行本地验证。
+- `scripts/export-testdata.ps1`：把 `generator` 导出成可直接上传到 OJ 的静态数据文件。
 - `scripts/templates/`：普通题、交互题和共享文件模板。
 - `examples/`：可直接运行的示例题工作区。
 - `SKILL.md`：让 AI Agent 稳定产出高质量题面、题解、数据的 agent skill。
