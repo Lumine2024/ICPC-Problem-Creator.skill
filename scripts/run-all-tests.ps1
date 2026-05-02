@@ -698,7 +698,7 @@ function Test-OneWorkspace {
     }
 
     Write-Stage -Stage "workspace" -Message "$($problem.Slug) ($WorkspacePath)"
-    Write-Stage -Stage "info" -Message "memoryLimitMb=$($problem.MemoryLimitMb) 将作为运行期内存保护阈值。"
+    Write-Stage -Stage "info" -Message "memoryLimitMb=$($problem.MemoryLimitMb) 仅对主解/参考解/错解生效；generator 与 validator 使用更宽松的本地校验额度。"
 
     $layout = New-BuildLayout -WorkspacePath $WorkspacePath -Slug $problem.Slug
     $compiledPrograms = @{}
@@ -773,7 +773,9 @@ function Test-OneWorkspace {
     $generatorPath = [string]$compiledPrograms["gen-tool"]
     $judgePath = [string]$compiledPrograms["judge-tool"]
     $timeoutMs = [Math]::Max($problem.TimeLimitMs * 3, $problem.TimeLimitMs + 1000)
+    $toolTimeoutMs = [Math]::Max($problem.TimeLimitMs * 60, 60000)
     $runtimeMemoryLimitMb = [Math]::Max($problem.MemoryLimitMb, 1)
+    $toolMemoryLimitMb = 0
     $generatedCases = [System.Collections.Generic.List[object]]::new()
 
     Write-Stage -Stage "generate" -Message $problem.Slug
@@ -787,7 +789,7 @@ function Test-OneWorkspace {
         $groupDir = Join-Path $layout.GeneratedRoot $caseItem.Group
         New-Item -ItemType Directory -Path $groupDir -Force | Out-Null
         $inputPath = Join-Path $groupDir ($caseItem.Name + ".in")
-        $generateResult = Invoke-External -FilePath $generatorPath -Arguments @($caseItem.Type, [string]$caseItem.Seed) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000 -MemoryLimitMb $runtimeMemoryLimitMb
+        $generateResult = Invoke-External -FilePath $generatorPath -Arguments @($caseItem.Type, [string]$caseItem.Seed) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         if ($generateResult.TimedOut -or $generateResult.ExitCode -ne 0) {
             $message = "generator 失败：case=$($caseItem.Name)"
             if ($generateResult.MemoryExceeded) {
@@ -817,6 +819,8 @@ function Test-OneWorkspace {
         return
     }
 
+    $validGeneratedCases = [System.Collections.Generic.List[object]]::new()
+
     Write-Stage -Stage "validate" -Message $problem.Slug
     foreach ($caseInfo in $generatedCases) {
         if ($script:IsWindowsHost) {
@@ -827,9 +831,9 @@ function Test-OneWorkspace {
                 "exit /b %errorlevel%"
             ) -join "`r`n"
             [System.IO.File]::WriteAllText($cmdPath, $cmdContent, [System.Text.ASCIIEncoding]::new())
-            $validatorResult = Invoke-External -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000 -MemoryLimitMb $runtimeMemoryLimitMb
+            $validatorResult = Invoke-External -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         } else {
-            $validatorResult = Invoke-External -FilePath $validatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs 10000 -MemoryLimitMb $runtimeMemoryLimitMb
+            $validatorResult = Invoke-External -FilePath $validatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         }
         if ($validatorResult.TimedOut -or $validatorResult.ExitCode -ne 0) {
             $message = "validator 失败：case=$($caseInfo.Name), input=$($caseInfo.InputPath), exit=$($validatorResult.ExitCode)"
@@ -840,7 +844,15 @@ function Test-OneWorkspace {
                 $message += "`n$($validatorResult.Stderr.Trim())"
             }
             Add-Failure -Workspace $problem.Slug -Stage "validate" -Message $message -Command $validatorResult.Command
+            continue
         }
+
+        $validGeneratedCases.Add($caseInfo) | Out-Null
+    }
+
+    if ($validGeneratedCases.Count -eq 0) {
+        Add-Failure -Workspace $problem.Slug -Stage "validate" -Message "没有任何通过 validator 的测试点。"
+        return
     }
 
     $mainSolution = @($problem.Solutions | Where-Object { $_.Role -eq "main" })[0]
@@ -848,7 +860,7 @@ function Test-OneWorkspace {
 
     if (-not $problem.Interactive) {
         Write-Stage -Stage "run-main" -Message $problem.Slug
-        foreach ($caseInfo in $generatedCases) {
+        foreach ($caseInfo in $validGeneratedCases) {
             $mainResult = Invoke-External -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
             if ($mainResult.TimedOut -or $mainResult.ExitCode -ne 0) {
                 $message = "主解失败：case=$($caseInfo.Name)"
@@ -874,7 +886,7 @@ function Test-OneWorkspace {
         Write-Stage -Stage "check-reference" -Message $problem.Slug
         foreach ($reference in $referenceSolutions) {
             $referenceInvocation = Get-Invocation -Problem $problem -Entry $reference -CompiledPrograms $compiledPrograms
-            foreach ($caseInfo in $generatedCases) {
+            foreach ($caseInfo in $validGeneratedCases) {
                 if ($caseInfo.CheckWith.Count -gt 0 -and $reference.Name -notin $caseInfo.CheckWith) { continue }
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
 
@@ -904,7 +916,7 @@ function Test-OneWorkspace {
             $wrongInvocation = Get-Invocation -Problem $problem -Entry $wrong -CompiledPrograms $compiledPrograms
             $testedCases = 0
             $failedCases = 0
-            foreach ($caseInfo in $generatedCases) {
+            foreach ($caseInfo in $validGeneratedCases) {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
                 $testedCases += 1
                 $wrongOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".out")
@@ -943,7 +955,7 @@ function Test-OneWorkspace {
         }
     } else {
         Write-Stage -Stage "run-main" -Message $problem.Slug
-        foreach ($caseInfo in $generatedCases) {
+        foreach ($caseInfo in $validGeneratedCases) {
             $transcriptPath = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + ".interactor.out")
             $judgeArgs = @($caseInfo.InputPath, $transcriptPath)
             if ($problem.InteractionAnswerPath) {
@@ -962,7 +974,7 @@ function Test-OneWorkspace {
         Write-Stage -Stage "check-reference" -Message $problem.Slug
         foreach ($reference in $referenceSolutions) {
             $referenceInvocation = Get-Invocation -Problem $problem -Entry $reference -CompiledPrograms $compiledPrograms
-            foreach ($caseInfo in $generatedCases) {
+            foreach ($caseInfo in $validGeneratedCases) {
                 if ($caseInfo.CheckWith.Count -gt 0 -and $reference.Name -notin $caseInfo.CheckWith) { continue }
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
 
@@ -986,7 +998,7 @@ function Test-OneWorkspace {
             $wrongInvocation = Get-Invocation -Problem $problem -Entry $wrong -CompiledPrograms $compiledPrograms
             $testedCases = 0
             $failedCases = 0
-            foreach ($caseInfo in $generatedCases) {
+            foreach ($caseInfo in $validGeneratedCases) {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
                 $testedCases += 1
                 $transcriptPath = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".interactor.out")
