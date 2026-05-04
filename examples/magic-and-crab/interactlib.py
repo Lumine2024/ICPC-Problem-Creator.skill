@@ -1,5 +1,5 @@
 import sys
-from subprocess import *
+from subprocess import Popen
 
 __all__ = ["write", "read", "wrong"]
 

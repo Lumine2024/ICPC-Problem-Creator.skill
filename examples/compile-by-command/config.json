@@ -12,10 +12,27 @@
     "path": "src/generator/generator.cpp",
     "cases": [
       { "name": "sample-1", "type": "sample", "seed": 1, "group": "sample" },
-      { "name": "min-1", "type": "min", "seed": 2, "group": "secret" },
-      { "name": "random-small-1", "type": "random-small", "seed": 3, "group": "secret", "checkWith": ["solution2", "python"] },
-      { "name": "random-large-1", "type": "random-large", "seed": 4, "group": "secret" },
-      { "name": "max-1", "type": "max", "seed": 5, "group": "secret" }
+      { "name": "defaults-1", "type": "defaults", "seed": 2, "group": "secret" },
+      { "name": "std-only-1", "type": "std-only", "seed": 3, "group": "secret" },
+      { "name": "opt-only-1", "type": "opt-only", "seed": 4, "group": "secret" },
+      { "name": "out-only-1", "type": "out-only", "seed": 5, "group": "secret" },
+      { "name": "warning-only-1", "type": "warning-only", "seed": 6, "group": "secret" },
+      { "name": "mixed-order-1", "type": "mixed-order", "seed": 7, "group": "secret" },
+      { "name": "many-spaces-1", "type": "many-spaces", "seed": 8, "group": "secret" },
+      { "name": "source-no-dot-1", "type": "source-no-dot", "seed": 9, "group": "secret" },
+      { "name": "warning-order-1", "type": "warning-order", "seed": 10, "group": "secret" },
+      { "name": "warning-special-1", "type": "warning-special", "seed": 11, "group": "secret" },
+      { "name": "long-line-1", "type": "long-line", "seed": 12, "group": "secret" },
+      { "name": "long-line-2", "type": "long-line", "seed": 13, "group": "secret" },
+      { "name": "anti-empty-split-1", "type": "anti-empty-split", "seed": 14, "group": "secret" },
+      { "name": "bulk-small-1", "type": "bulk-small", "seed": 15, "group": "secret", "checkWith": ["solution2", "python"] },
+      { "name": "bulk-small-2", "type": "bulk-small", "seed": 16, "group": "secret", "checkWith": ["solution2", "python"] },
+      { "name": "bulk-medium-1", "type": "bulk-medium", "seed": 17, "group": "secret", "checkWith": ["solution2"] },
+      { "name": "bulk-medium-2", "type": "bulk-medium", "seed": 18, "group": "secret", "checkWith": ["solution2"] },
+      { "name": "bulk-large-1", "type": "bulk-large", "seed": 19, "group": "secret", "checkWith": ["solution2"] },
+      { "name": "bulk-large-2", "type": "bulk-large", "seed": 20, "group": "secret", "checkWith": ["solution2"] },
+      { "name": "bulk-max-1", "type": "bulk-max", "seed": 21, "group": "secret", "checkWith": ["solution2"] },
+      { "name": "bulk-max-2", "type": "bulk-max", "seed": 22, "group": "secret", "checkWith": ["solution2"] }
     ]
   },
   "checker": "src/checker/checker.cpp",
@@ -30,7 +47,40 @@
     { "name": "python", "path": "src/solution.py", "language": "python", "role": "reference" }
   ],
   "wrongSolutions": [
-    { "name": "wrong-default-std", "path": "src/wrong/wrong-default-std.cpp", "language": "cpp", "expected": "fail" },
-    { "name": "wrong-default-output", "path": "src/wrong/wrong-default-output.cpp", "language": "cpp", "expected": "fail" }
+    {
+      "name": "wrong-default-std",
+      "path": "src/wrong/wrong-default-std.cpp",
+      "language": "cpp",
+      "expected": "fail",
+      "cases": ["defaults-1", "opt-only-1", "out-only-1", "warning-only-1", "source-no-dot-1"]
+    },
+    {
+      "name": "wrong-default-output",
+      "path": "src/wrong/wrong-default-output.cpp",
+      "language": "cpp",
+      "expected": "fail",
+      "cases": ["defaults-1", "std-only-1", "opt-only-1", "warning-only-1", "anti-empty-split-1"]
+    },
+    {
+      "name": "wrong-single-space",
+      "path": "src/wrong/wrong-single-space.cpp",
+      "language": "cpp",
+      "expected": "fail",
+      "cases": ["many-spaces-1", "anti-empty-split-1", "bulk-large-1"]
+    },
+    {
+      "name": "wrong-sort-warnings",
+      "path": "src/wrong/wrong-sort-warnings.cpp",
+      "language": "cpp",
+      "expected": "fail",
+      "cases": ["warning-order-1", "warning-special-1", "long-line-1", "long-line-2"]
+    },
+    {
+      "name": "wrong-source-dot",
+      "path": "src/wrong/wrong-source-dot.cpp",
+      "language": "cpp",
+      "expected": "fail",
+      "cases": ["source-no-dot-1", "bulk-medium-1", "bulk-medium-2"]
+    }
   ]
 }

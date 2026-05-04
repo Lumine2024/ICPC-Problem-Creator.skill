@@ -1,52 +1,86 @@
 #include "testlib.h"
-#include <set>
-#include <sstream>
-#include <string>
+#include <bits/stdc++.h>
 
 using namespace std;
 
-int main(int argc, char** argv) {
+namespace {
+
+vector<string> split_tokens(const string& line) {
+    vector<string> tokens;
+    string current;
+    for (char ch : line) {
+        if (ch == ' ') {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+        } else {
+            current += ch;
+        }
+    }
+    if (!current.empty()) {
+        tokens.push_back(current);
+    }
+    return tokens;
+}
+
+void require_condition(bool condition, const string& message) {
+    if (!condition) {
+        quitf(_fail, "%s", message.c_str());
+    }
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
     registerValidation(argc, argv);
 
-    int t = inf.readInt(1, 20, "T");
+    int t = inf.readInt(1, 2000, "T");
     inf.readEoln();
-    for (int i = 1; i <= t; ++i) {
-        setTestCase(i);
+
+    for (int tc = 1; tc <= t; ++tc) {
         string line = inf.readLine();
-        ensuref(line.size() <= 200, "line %d is too long", i);
-        for (unsigned char c : line) {
-            ensuref(c < 0x80u, "non-ascii character on line %d", i);
+        require_condition(!line.empty(), "empty command line");
+        require_condition(static_cast<int>(line.size()) <= 200, "command line too long");
+        for (char ch : line) {
+            unsigned char value = static_cast<unsigned char>(ch);
+            require_condition(32 <= value && value <= 126, "non-printable ascii found");
         }
 
-        stringstream ss(line);
-        string token;
-        ensuref(bool(ss >> token), "line %d is empty", i);
-        ensuref(token == "g++", "line %d does not start with g++", i);
+        vector<string> tokens = split_tokens(line);
+        require_condition(!tokens.empty(), "no tokens");
+        require_condition(tokens[0] == "g++", "first token must be g++");
 
-        set<string> seenWarnings;
-        bool hasFile = false, hasStd = false, hasOpt = false, hasOutput = false;
-        while (ss >> token) {
-            if (token[0] != '-') {
-                ensuref(!hasFile, "multiple source files on line %d", i);
-                hasFile = true;
-            } else if (token.size() > 5 && token.substr(0, 5) == "-std=") {
-                ensuref(!hasStd, "multiple standards on line %d", i);
-                hasStd = true;
-            } else if (token.size() > 2 && token[1] == 'O') {
-                ensuref(!hasOpt, "multiple optimization flags on line %d", i);
-                hasOpt = true;
-            } else if (token.size() > 2 && token[1] == 'W') {
-                ensuref(!seenWarnings.count(token), "duplicate warning flag on line %d", i);
-                seenWarnings.insert(token);
-            } else if (token.size() > 2 && token[1] == 'o') {
-                ensuref(!hasOutput, "multiple output flags on line %d", i);
-                hasOutput = true;
+        int source_count = 0;
+        int std_count = 0;
+        int opt_count = 0;
+        int out_count = 0;
+        set<string> warning_set;
+
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            const string& token = tokens[i];
+            if (token.rfind("-std=", 0) == 0) {
+                ++std_count;
+                require_condition(static_cast<int>(token.size()) > 5, "empty std token");
+            } else if (token.rfind("-O", 0) == 0) {
+                ++opt_count;
+                require_condition(static_cast<int>(token.size()) > 2, "empty optimization token");
+            } else if (token.rfind("-W", 0) == 0) {
+                require_condition(static_cast<int>(token.size()) > 2, "empty warning token");
+                require_condition(warning_set.insert(token).second, "duplicate warning token");
+            } else if (token.rfind("-o", 0) == 0) {
+                ++out_count;
+                require_condition(static_cast<int>(token.size()) > 2, "empty output token");
             } else {
-                ensuref(false, "unknown flag %s on line %d", token.c_str(), i);
+                require_condition(token[0] != '-', "unknown flag token");
+                ++source_count;
             }
         }
 
-        ensuref(hasFile, "missing source file on line %d", i);
+        require_condition(source_count == 1, "source token count must be 1");
+        require_condition(std_count <= 1, "too many std tokens");
+        require_condition(opt_count <= 1, "too many optimization tokens");
+        require_condition(out_count <= 1, "too many output tokens");
     }
 
     inf.readEof();

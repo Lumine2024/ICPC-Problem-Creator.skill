@@ -8,31 +8,35 @@ int main() {
 
     int t = 0;
     cin >> t;
-    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    string line;
+    getline(cin, line);
     while (t--) {
-        string line;
         getline(cin, line);
         stringstream ss(line);
         string token;
         string source;
         string standard = "c++20";
-        string optimize = "None";
-        string output = "a.out";
+        string optimization = "None";
         vector<string> warnings;
-
+        string output = "a.out";
+        ss >> token;
         while (ss >> token) {
-            if (token == "g++") continue;
-            if (token[0] != '-') source = token;
-            else if (token.size() > 5 && token.substr(0, 5) == "-std=") standard = token.substr(5);
-            else if (token.size() > 2 && token[1] == 'O') optimize = token.substr(1);
-            else if (token.size() > 2 && token[1] == 'W') warnings.push_back(token.substr(1));
-            else if (token.size() > 2 && token[1] == 'o') output = token.substr(2);
+            if (token.rfind("-std=", 0) == 0) {
+                standard = token.substr(5);
+            } else if (token.rfind("-O", 0) == 0) {
+                optimization = token.substr(1);
+            } else if (token.rfind("-W", 0) == 0) {
+                warnings.push_back(token.substr(1));
+            } else if (token.rfind("-o", 0) == 0) {
+                output = token.substr(2);
+            } else {
+                source = token;
+            }
         }
-
-        cout << source << '\n' << standard << '\n' << optimize << '\n';
+        cout << source << '\n' << standard << '\n' << optimization << '\n';
         if (warnings.empty()) cout << "None\n";
         else {
-            for (int i = 0; i < (int)warnings.size(); ++i) {
+            for (size_t i = 0; i < warnings.size(); ++i) {
                 if (i) cout << ' ';
                 cout << warnings[i];
             }

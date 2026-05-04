@@ -200,14 +200,14 @@ function Invoke-External {
         throw $lastStartError
     }
 
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
     if ($InputFile) {
         $content = [System.IO.File]::ReadAllText($InputFile)
         $process.StandardInput.Write($content)
     }
     $process.StandardInput.Close()
-
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
 
     $timedOut = $false
     $memoryExceeded = $false
@@ -311,8 +311,8 @@ def pump(src, dst_proc):
         except Exception:
             pass
 
-t1 = threading.Thread(target=pump, cppCompileArgs=(contestant.stdout, interactor), daemon=True)
-t2 = threading.Thread(target=pump, cppCompileArgs=(interactor.stdout, contestant), daemon=True)
+t1 = threading.Thread(target=pump, args=(contestant.stdout, interactor), daemon=True)
+t2 = threading.Thread(target=pump, args=(interactor.stdout, contestant), daemon=True)
 t1.start()
 t2.start()
 

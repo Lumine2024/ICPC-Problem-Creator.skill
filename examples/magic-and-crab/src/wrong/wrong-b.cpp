@@ -6,10 +6,10 @@ int main() {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
-    const vector<int> primes = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53};
+    const vector<int> primes = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29};
     for (int p : primes) {
         cout << "? " << p << endl;
-        long long g;
+        int g;
         cin >> g;
         if (g == 1) {
             cout << "! " << p << endl;

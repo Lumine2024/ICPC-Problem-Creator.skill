@@ -1,16 +1,17 @@
 # 魔法与螃蟹
 
-这是内部交互题工作区，只用于题面维护、本地联调和数据验证。
+这是一个用于验证新版 `icpc-problem-creator` skill 的交互题工作区。
 
-## 运行
+本次重写保留了原题题意与交互模型，不改 `statement.md` 文案，只重做了工程化部分：
+
+- 用交互题模板重新建立工作区；
+- 补齐了可本地联调的 interactor、validator、generator；
+- 提供了 2 份 C++ 参考解和 1 份 Python 参考解；
+- 配置了 30 个可复现测试文件；
+- 准备了 3 份典型错解，并用定向数据确保它们会被卡掉。
+
+本题可以直接通过下面的命令在本地验证：
 
 ```powershell
 ./scripts/run-all-tests.ps1 -Workspace "examples/magic-and-crab"
 ```
-
-## `config.json`
-
-- `interactive = true`，因此全局脚本会使用 interactor 流程。
-- `generator.cases` 用 `type + seed` 复现隐藏值。
-- `solutions` 包含主解、第二标程和 Python 参考实现。
-- `wrongSolutions` 包含会在交互中被判错的典型错误策略。

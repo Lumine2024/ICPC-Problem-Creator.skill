@@ -10,7 +10,7 @@
 
 ## `config.json`
 
-- `generator.cases` 描述了样例、边界和随机数据。
-- `checker` 使用基于 token 的比较逻辑。
+- `generator.cases` 提供 20 份以上的多组数据文件，覆盖默认值、乱序 token、大量空格、长行和接近上界的大数据。
+- `checker` 按行读取并按 token 比较，允许行尾多余空格，但要求语义输出完全一致。
 - `solutions` 包含主解、第二标程和 Python 参考实现。
-- `wrongSolutions` 包含会在默认标准或默认输出文件上犯错的典型错解。
+- `wrongSolutions` 覆盖默认值、空格切分、警告顺序和源文件识别等典型错误。

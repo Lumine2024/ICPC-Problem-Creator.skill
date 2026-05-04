@@ -3,7 +3,10 @@ tmp
 *.exe
 
 # ignore all generated files except the examples
-examples
+examples/**
 !examples/a-plus-b
+!examples/a-plus-b/**
 !examples/compile-by-command
+!examples/compile-by-command/**
 !examples/magic-and-crab
+!examples/magic-and-crab/**

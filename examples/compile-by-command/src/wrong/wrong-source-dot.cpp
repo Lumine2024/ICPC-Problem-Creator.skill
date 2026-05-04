@@ -14,12 +14,11 @@ int main() {
         getline(cin, line);
         stringstream ss(line);
         string token;
-        string source;
+        string source = "unknown.cc";
         string standard = "c++17";
         string optimization = "None";
         vector<string> warnings;
-        string output = "main.out";
-        bool seen_output = false;
+        string output = "a.out";
         ss >> token;
         while (ss >> token) {
             if (token.rfind("-std=", 0) == 0) {
@@ -29,14 +28,10 @@ int main() {
             } else if (token.rfind("-W", 0) == 0) {
                 warnings.push_back(token.substr(1));
             } else if (token.rfind("-o", 0) == 0) {
-                seen_output = true;
                 output = token.substr(2);
-            } else {
+            } else if (token.find('.') != string::npos) {
                 source = token;
             }
-        }
-        if (!seen_output && !source.empty()) {
-            output = source + ".out";
         }
         cout << source << '\n' << standard << '\n' << optimization << '\n';
         if (warnings.empty()) cout << "None\n";

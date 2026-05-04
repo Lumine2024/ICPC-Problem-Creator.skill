@@ -1,37 +1,41 @@
 import sys
 
 
-def solve_one(line: str) -> str:
+def parse_command(line: str):
+    tokens = line.split()
     source = ""
     standard = "c++17"
-    optimize = "None"
-    output = "a.out"
+    optimization = "None"
     warnings = []
+    output = "a.out"
 
-    for token in line.split():
-        if token == "g++":
-            continue
-        if not token.startswith("-"):
-            source = token
-        elif token.startswith("-std="):
+    for token in tokens[1:]:
+        if token.startswith("-std="):
             standard = token[5:]
-        elif len(token) > 2 and token[1] == "O":
-            optimize = token[1:]
-        elif len(token) > 2 and token[1] == "W":
+        elif token.startswith("-O"):
+            optimization = token[1:]
+        elif token.startswith("-W"):
             warnings.append(token[1:])
-        elif len(token) > 2 and token[1] == "o":
+        elif token.startswith("-o"):
             output = token[2:]
+        else:
+            source = token
 
-    warning_line = "None" if not warnings else " ".join(warnings)
-    return "\n".join([source, standard, optimize, warning_line, output])
+    return source, standard, optimization, warnings, output
 
 
 def main() -> None:
-    t = int(sys.stdin.readline())
-    answers = []
-    for _ in range(t):
-        answers.append(solve_one(sys.stdin.readline().rstrip("\n")))
-    sys.stdout.write("\n".join(answers) + "\n")
+    data = sys.stdin.read().splitlines()
+    t = int(data[0])
+    out = []
+    for i in range(1, t + 1):
+        source, standard, optimization, warnings, output = parse_command(data[i])
+        out.append(source)
+        out.append(standard)
+        out.append(optimization)
+        out.append(" ".join(warnings) if warnings else "None")
+        out.append(output)
+    sys.stdout.write("\n".join(out))
 
 
 if __name__ == "__main__":
