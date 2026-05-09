@@ -1,0 +1,17 @@
+name: run-all-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: run all tests
+        shell: pwsh
+        run: ./scripts/run-all-tests.ps1
+
