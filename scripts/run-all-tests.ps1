@@ -593,6 +593,9 @@ function Invoke-CppCompilation {
 
     $cppCompileArgs = Expand-TemplateTokens -Template (ConvertTo-Array $Problem.BuildConfig.cppFlags) -Tokens $tokens
     $cppCompileArgs += @("-I", $Problem.IncludeDir, $SourcePath, "-o", $OutputPath)
+    if ($script:IsWindowsHost) {
+        $cppCompileArgs += @("-Wl,--stack,268435456")
+    }
     return Invoke-External -FilePath ([string]$Problem.BuildConfig.cppCompiler) -Arguments $cppCompileArgs -WorkingDirectory $Problem.WorkspacePath
 }
 
@@ -1036,6 +1039,10 @@ function Test-OneWorkspace {
     }
 
     Write-Stage -Stage "success" -Message "$($problem.Slug) passed $($generatedCases.Count) cases."
+}
+
+if (-not $script:IsWindowsHost) {
+    Invoke-External -FilePath "ulimit" -Arguments @("-s", "unlimited")
 }
 
 $workspaceList = Resolve-WorkspaceList -Requested $Workspace
