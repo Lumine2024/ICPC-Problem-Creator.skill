@@ -110,6 +110,18 @@ function ConvertTo-Array {
     return ,@([string]$Value)
 }
 
+function ConvertTo-LfText {
+    param(
+        [AllowNull()]
+        [string]$Content
+    )
+
+    if ($null -eq $Content) {
+        return ""
+    }
+    return ($Content -replace "`r`n", "`n" -replace "`r", "`n")
+}
+
 function Resolve-WorkspaceList {
     param(
         [string[]]$Requested
@@ -584,7 +596,7 @@ function Test-OneWorkspace {
             Add-Failure -Workspace $problem.Slug -Stage "generate" -Message $message -Command $generateResult.Command
             continue
         }
-        [System.IO.File]::WriteAllText($inputPath, $generateResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($inputPath, (ConvertTo-LfText -Content $generateResult.Stdout), [System.Text.UTF8Encoding]::new($false))
         $generatedCases.Add([pscustomobject]@{
             Name       = $caseInfo.Name
             Type       = $caseInfo.Type
@@ -650,7 +662,7 @@ function Test-OneWorkspace {
             Add-Failure -Workspace $problem.Slug -Stage "answer" -Message $message -Command $mainResult.Command
             continue
         }
-        [System.IO.File]::WriteAllText($caseInfo.AnswerPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($caseInfo.AnswerPath, (ConvertTo-LfText -Content $mainResult.Stdout), [System.Text.UTF8Encoding]::new($false))
 
         $manifestCases.Add([pscustomobject]@{
             name   = $caseInfo.Name
