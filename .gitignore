@@ -1,6 +1,7 @@
 .codex*
 tmp
 *.exe
+__pycache__
 
 # ignore all generated files except the examples
 examples/**

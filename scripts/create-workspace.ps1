@@ -9,47 +9,10 @@ param(
     [switch]$Interactive
 )
 
+. (Join-Path $PSScriptRoot "lib/icpc-common.ps1")
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
-function Get-TemplateContent {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$TemplatePath
-    )
-
-    return [System.IO.File]::ReadAllText($TemplatePath, [System.Text.Encoding]::UTF8)
-}
-
-function Write-Utf8File {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [Parameter(Mandatory = $true)]
-        [string]$Content
-    )
-
-    $directory = Split-Path -Parent $Path
-    if (-not [string]::IsNullOrWhiteSpace($directory)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    }
-    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
-}
-
-function Expand-Template {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Content,
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Replacements
-    )
-
-    $expanded = $Content
-    foreach ($pair in $Replacements.GetEnumerator()) {
-        $expanded = $expanded.Replace($pair.Key, $pair.Value)
-    }
-    return $expanded
-}
 
 if ($Name.IndexOfAny([char[]]@('/', '\')) -ge 0) {
     throw "Name 不能包含路径分隔符。"

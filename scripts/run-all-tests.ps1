@@ -5,6 +5,8 @@ param(
     [string[]]$Workspace
 )
 
+. (Join-Path $PSScriptRoot "lib/icpc-common.ps1")
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -43,23 +45,6 @@ function Write-Stage {
     Write-Host "[$Stage] $Message" -ForegroundColor $color
 }
 
-function Format-Command {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-        [string[]]$Arguments = @()
-    )
-
-    $parts = @($FilePath) + $Arguments
-    return ($parts | ForEach-Object {
-        if ($_ -match '\s') {
-            '"' + ($_ -replace '"', '\"') + '"'
-        } else {
-            $_
-        }
-    }) -join ' '
-}
-
 function Add-Failure {
     param(
         [Parameter(Mandatory = $true)]
@@ -81,175 +66,6 @@ function Add-Failure {
     Write-Host "[$Stage][error] ${Workspace}: $Message" -ForegroundColor Red
     if ($Command) {
         Write-Host "[$Stage][repro] $Command" -ForegroundColor DarkYellow
-    }
-}
-
-function Assert-FileExists {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "$Description 不存在：$Path"
-    }
-}
-
-function ConvertTo-Array {
-    param(
-        [object]$Value
-    )
-
-    if ($null -eq $Value) {
-        return ,@()
-    }
-    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-        return ,@($Value | ForEach-Object { [string]$_ })
-    }
-    return ,@([string]$Value)
-}
-
-function Resolve-WorkspaceList {
-    param(
-        [string[]]$Requested
-    )
-
-    if ($Requested -and $Requested.Count -gt 0) {
-        return $Requested | ForEach-Object {
-            if ([System.IO.Path]::IsPathRooted($_)) {
-                [System.IO.Path]::GetFullPath($_)
-            } else {
-                [System.IO.Path]::GetFullPath((Join-Path $repoRoot $_))
-            }
-        }
-    }
-
-    return Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter "config.json" -File |
-        Where-Object {
-            $_.FullName -notmatch '[\\/]\.git[\\/]' -and
-            $_.FullName -notmatch '[\\/]build[\\/]' -and
-            $_.FullName -notmatch '[\\/]\.codex-test-artifacts[\\/]' -and
-            $_.FullName -notmatch '[\\/]scripts[\\/]templates[\\/]'
-        } |
-        ForEach-Object { $_.Directory.FullName } |
-        Sort-Object -Unique
-}
-
-function Resolve-ProblemPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspaceRoot,
-        [Parameter(Mandatory = $true)]
-        [string]$RelativePath,
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    $resolved = [System.IO.Path]::GetFullPath((Join-Path $WorkspaceRoot $RelativePath))
-    Assert-FileExists -Path $resolved -Description $Description
-    return $resolved
-}
-
-function Invoke-External {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-        [string[]]$Arguments = @(),
-        [string]$WorkingDirectory = $repoRoot,
-        [string]$InputFile,
-        [int]$TimeoutMs = 0,
-        [int]$MemoryLimitMb = 0
-    )
-
-    $command = Format-Command -FilePath $FilePath -Arguments $Arguments
-    Write-Host $command -ForegroundColor DarkGray
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $FilePath
-    $psi.WorkingDirectory = $WorkingDirectory
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.RedirectStandardInput = $true
-    foreach ($argument in $Arguments) {
-        [void]$psi.ArgumentList.Add([string]$argument)
-    }
-
-    $started = $false
-    $lastStartError = $null
-    $process = $null
-    foreach ($attempt in 1..5) {
-        try {
-            $process = [System.Diagnostics.Process]::new()
-            $process.StartInfo = $psi
-            [void]$process.Start()
-            $started = $true
-            break
-        } catch {
-            $lastStartError = $_
-            if ($null -ne $process) {
-                $process.Dispose()
-            }
-            $process = $null
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    if (-not $started) {
-        throw $lastStartError
-    }
-
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-
-    if ($InputFile) {
-        $content = [System.IO.File]::ReadAllText($InputFile)
-        $process.StandardInput.Write($content)
-    }
-    $process.StandardInput.Close()
-
-    $timedOut = $false
-    $memoryExceeded = $false
-    $memoryLimitBytes = if ($MemoryLimitMb -gt 0) { [int64]$MemoryLimitMb * 1MB } else { 0L }
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $process.HasExited) {
-        $shouldKill = $false
-        if ($TimeoutMs -gt 0 -and $watch.ElapsedMilliseconds -gt $TimeoutMs) {
-            $timedOut = $true
-            $shouldKill = $true
-        }
-        if (-not $shouldKill -and $memoryLimitBytes -gt 0) {
-            try {
-                $process.Refresh()
-                if ($process.WorkingSet64 -gt $memoryLimitBytes -or $process.PrivateMemorySize64 -gt $memoryLimitBytes) {
-                    $memoryExceeded = $true
-                    $shouldKill = $true
-                }
-            } catch {
-            }
-        }
-        if ($shouldKill) {
-            try {
-                $process.Kill($true)
-            } catch {
-            }
-            break
-        }
-        Start-Sleep -Milliseconds 50
-    }
-
-    $process.WaitForExit()
-    $stdoutTask.Wait()
-    $stderrTask.Wait()
-
-    return [pscustomobject]@{
-        Command  = $command
-        ExitCode = $process.ExitCode
-        TimedOut = $timedOut
-        MemoryExceeded = $memoryExceeded
-        Stdout   = $stdoutTask.Result
-        Stderr   = $stderrTask.Result
     }
 }
 
@@ -282,71 +98,14 @@ function Invoke-InteractivePair {
     }
 
     $runnerPath = Join-Path $artifactRoot "interactive-runner.py"
+    $runnerTemplatePath = Join-Path $PSScriptRoot "lib/interactive-runner.py"
     $runnerLibPath = Join-Path $artifactRoot "interactlib.py"
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "templates/shared/interactlib.py") -Destination $runnerLibPath -Force
-    $runner = @'
-import json
-import subprocess
-import sys
-import threading
-from interactlib import write
-
-contestant_cmd = json.loads(sys.argv[1])
-interactor_cmd = json.loads(sys.argv[2])
-working_dir = sys.argv[3]
-timeout = float(sys.argv[4])
-
-contestant = subprocess.Popen(contestant_cmd, cwd=working_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-interactor = subprocess.Popen(interactor_cmd, cwd=working_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-
-def pump(src, dst_proc):
-    try:
-        for line in src:
-            write(dst_proc, line.rstrip("\n"), quiet=True)
-    except BrokenPipeError:
-        pass
-    finally:
-        try:
-            dst_proc.stdin.close()
-        except Exception:
-            pass
-
-t1 = threading.Thread(target=pump, args=(contestant.stdout, interactor), daemon=True)
-t2 = threading.Thread(target=pump, args=(interactor.stdout, contestant), daemon=True)
-t1.start()
-t2.start()
-
-timed_out = False
-try:
-    contestant.wait(timeout=timeout)
-    interactor.wait(timeout=timeout)
-except subprocess.TimeoutExpired:
-    timed_out = True
-    for proc in (contestant, interactor):
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    contestant.wait()
-    interactor.wait()
-
-t1.join(timeout=1.0)
-t2.join(timeout=1.0)
-
-result = {
-    "contestantExitCode": contestant.returncode,
-    "interactorExitCode": interactor.returncode,
-    "contestantStderr": contestant.stderr.read(),
-    "interactorStderr": interactor.stderr.read(),
-    "timedOut": timed_out
-}
-print(json.dumps(result))
-'@
-    [System.IO.File]::WriteAllText($runnerPath, $runner, [System.Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath $runnerTemplatePath -Destination $runnerPath -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/interactlib.py") -Destination $runnerLibPath -Force
 
     $contestantList = @($ContestantFilePath) + $ContestantArguments
     $interactorList = @($InteractorFilePath) + $InteractorArguments
-    $runnerResult = Invoke-External -FilePath $python -Arguments @($runnerPath, (ConvertTo-Json $contestantList -Compress), (ConvertTo-Json $interactorList -Compress), $WorkingDirectory, ([string]([Math]::Max($TimeoutMs, 1) / 1000.0))) -WorkingDirectory $repoRoot -TimeoutMs ([Math]::Max($TimeoutMs + 5000, 10000))
+    $runnerResult = Invoke-External -RepoRoot $repoRoot -FilePath $python -Arguments @($runnerPath, (ConvertTo-Json $contestantList -Compress), (ConvertTo-Json $interactorList -Compress), $WorkingDirectory, ([string]([Math]::Max($TimeoutMs, 1) / 1000.0))) -WorkingDirectory $repoRoot -TimeoutMs ([Math]::Max($TimeoutMs + 5000, 10000))
     if ($runnerResult.ExitCode -ne 0) {
         throw "交互 broker 执行失败：$($runnerResult.Stderr)"
     }
@@ -371,39 +130,6 @@ print(json.dumps(result))
         Verdict            = $verdict
         TimedOut           = [bool]$payload.timedOut
     }
-}
-
-function Find-PythonCommand {
-    param(
-        [hashtable]$BuildConfig
-    )
-
-    if ($BuildConfig.ContainsKey("pythonCommand")) {
-        return [string]$BuildConfig.pythonCommand
-    }
-
-    foreach ($candidate in @("python3", "python")) {
-        if (Get-Command $candidate -ErrorAction SilentlyContinue) {
-            return $candidate
-        }
-    }
-
-    return $null
-}
-
-function Expand-TemplateTokens {
-    param(
-        [string[]]$Template,
-        [hashtable]$Tokens
-    )
-
-    return ,@($Template | ForEach-Object {
-        $value = [string]$_
-        foreach ($key in $Tokens.Keys) {
-            $value = $value.Replace("{{${key}}}", [string]$Tokens[$key])
-        }
-        $value
-    })
 }
 
 function Read-ProblemConfig {
@@ -539,66 +265,6 @@ function New-BuildLayout {
     }
 }
 
-function Wait-ForFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [int]$TimeoutMs = 120000,
-        [int]$PollIntervalMs = 250
-    )
-
-    $deadline = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($deadline.ElapsedMilliseconds -lt $TimeoutMs) {
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            return $true
-        }
-        Start-Sleep -Milliseconds $PollIntervalMs
-    }
-
-    return (Test-Path -LiteralPath $Path -PathType Leaf)
-}
-
-function Get-ExecutableExtension {
-    if ($script:IsWindowsHost) {
-        return ".exe"
-    }
-    return ""
-}
-
-function Invoke-CppCompilation {
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Problem,
-        [Parameter(Mandatory = $true)]
-        [string]$SourcePath,
-        [Parameter(Mandatory = $true)]
-        [string]$OutputPath,
-        [string[]]$Override = @()
-    )
-
-    $tokens = @{
-        source   = $SourcePath
-        output   = $OutputPath
-        include  = $Problem.IncludeDir
-        standard = $Problem.Standard
-    }
-
-    $overrideArgs = ConvertTo-Array $Override
-    if ($overrideArgs.Count -gt 0) {
-        $expanded = Expand-TemplateTokens -Template $overrideArgs -Tokens $tokens
-        $filePath = $expanded[0]
-        $arguments = if ($expanded.Count -gt 1) { @($expanded[1..($expanded.Count - 1)]) } else { @() }
-        return Invoke-External -FilePath $filePath -Arguments $arguments -WorkingDirectory $Problem.WorkspacePath
-    }
-
-    $cppCompileArgs = Expand-TemplateTokens -Template (ConvertTo-Array $Problem.BuildConfig.cppFlags) -Tokens $tokens
-    $cppCompileArgs += @("-I", $Problem.IncludeDir, $SourcePath, "-o", $OutputPath)
-    if ($script:IsWindowsHost) {
-        $cppCompileArgs += @("-Wl,--stack,268435456")
-    }
-    return Invoke-External -FilePath ([string]$Problem.BuildConfig.cppCompiler) -Arguments $cppCompileArgs -WorkingDirectory $Problem.WorkspacePath
-}
-
 function Assert-CompiledProgram {
     param(
         [Parameter(Mandatory = $true)]
@@ -614,7 +280,7 @@ function Assert-CompiledProgram {
     }
 
     Write-Stage -Stage "compile" -Message "$($Problem.Slug) recompiling $($Entry.Name) because artifact is missing"
-    $result = Invoke-CppCompilation -Problem $Problem -SourcePath $Entry.Path -OutputPath $OutputPath -Override $Entry.CompileCommand
+    $result = Invoke-CppCompilation -RepoRoot $repoRoot -Problem $Problem -SourcePath $Entry.Path -OutputPath $OutputPath -Override $Entry.CompileCommand -AddWindowsStackFlag:$script:IsWindowsHost
     if ($result.TimedOut -or $result.ExitCode -ne 0) {
         $message = "编译失败：$($Entry.Name)"
         if ($result.Stderr) {
@@ -630,43 +296,6 @@ function Assert-CompiledProgram {
 
     Add-Failure -Workspace $Problem.Slug -Stage "compile" -Message "编译命令返回成功，但在 120000ms 内未等到产物出现：$OutputPath" -Command $result.Command
     return $false
-}
-
-function Get-Invocation {
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Problem,
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Entry,
-        [Parameter(Mandatory = $true)]
-        [hashtable]$CompiledPrograms
-    )
-
-    if ($Entry.Language -eq "cpp") {
-        return [pscustomobject]@{
-            FilePath  = [string]$CompiledPrograms[$Entry.Name]
-            Arguments = @()
-        }
-    }
-
-    if ($Entry.Language -eq "python") {
-        if (-not $Problem.PythonCommand) {
-            throw "存在 Python 方案，但未找到可用 python 解释器"
-        }
-        if ($Entry.RunCommand.Count -gt 0) {
-            $expanded = Expand-TemplateTokens -Template $Entry.RunCommand -Tokens @{ path = $Entry.Path }
-            return [pscustomobject]@{
-                FilePath  = $expanded[0]
-                Arguments = if ($expanded.Count -gt 1) { @($expanded[1..($expanded.Count - 1)]) } else { @() }
-            }
-        }
-        return [pscustomobject]@{
-            FilePath  = $Problem.PythonCommand
-            Arguments = @($Entry.Path)
-        }
-    }
-
-    throw "不支持的语言：$($Entry.Language)"
 }
 
 function Test-CaseMatchesEntry {
@@ -706,7 +335,7 @@ function Test-OneWorkspace {
     $layout = New-BuildLayout -WorkspacePath $WorkspacePath -Slug $problem.Slug
     $compiledPrograms = @{}
     $compileFailed = $false
-    $extension = Get-ExecutableExtension
+    $extension = Get-ExecutableExtension -IsWindowsHost $script:IsWindowsHost
 
     $compileEntries = @(
         [pscustomobject]@{ Name = "input-tool"; OutputName = "validator"; Path = $problem.ValidatorPath; CompileCommand = @() },
@@ -736,7 +365,7 @@ function Test-OneWorkspace {
                 $compileFailed = $true
                 continue
             }
-            $versionResult = Invoke-External -FilePath $problem.PythonCommand -Arguments @("--version") -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+            $versionResult = Invoke-External -RepoRoot $repoRoot -FilePath $problem.PythonCommand -Arguments @("--version") -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
             if ($versionResult.ExitCode -ne 0) {
                 Add-Failure -Workspace $problem.Slug -Stage "compile" -Message "python 不可用：$($entry.Name)`n$($versionResult.Stderr)" -Command $versionResult.Command
                 $compileFailed = $true
@@ -750,7 +379,7 @@ function Test-OneWorkspace {
             [string]$entry.Name
         }
         $outputPath = Join-Path $layout.BinRoot ($outputBaseName + $extension)
-        $result = Invoke-CppCompilation -Problem $problem -SourcePath $entry.Path -OutputPath $outputPath -Override $entry.CompileCommand
+        $result = Invoke-CppCompilation -RepoRoot $repoRoot -Problem $problem -SourcePath $entry.Path -OutputPath $outputPath -Override $entry.CompileCommand -AddWindowsStackFlag:$script:IsWindowsHost
         if ($result.TimedOut -or $result.ExitCode -ne 0) {
             $message = "编译失败：$($entry.Name)"
             if ($result.Stderr) {
@@ -792,7 +421,7 @@ function Test-OneWorkspace {
         $groupDir = Join-Path $layout.GeneratedRoot $caseItem.Group
         New-Item -ItemType Directory -Path $groupDir -Force | Out-Null
         $inputPath = Join-Path $groupDir ($caseItem.Name + ".in")
-        $generateResult = Invoke-External -FilePath $generatorPath -Arguments @($caseItem.Type, [string]$caseItem.Seed) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
+        $generateResult = Invoke-External -RepoRoot $repoRoot -FilePath $generatorPath -Arguments @($caseItem.Type, [string]$caseItem.Seed) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         if ($generateResult.TimedOut -or $generateResult.ExitCode -ne 0) {
             $message = "generator 失败：case=$($caseItem.Name)"
             if ($generateResult.MemoryExceeded) {
@@ -834,9 +463,9 @@ function Test-OneWorkspace {
                 "exit /b %errorlevel%"
             ) -join "`r`n"
             [System.IO.File]::WriteAllText($cmdPath, $cmdContent, [System.Text.ASCIIEncoding]::new())
-            $validatorResult = Invoke-External -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
+            $validatorResult = Invoke-External -RepoRoot $repoRoot -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         } else {
-            $validatorResult = Invoke-External -FilePath $validatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
+            $validatorResult = Invoke-External -RepoRoot $repoRoot -FilePath $validatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
         }
         if ($validatorResult.TimedOut -or $validatorResult.ExitCode -ne 0) {
             $message = "validator 失败：case=$($caseInfo.Name), input=$($caseInfo.InputPath), exit=$($validatorResult.ExitCode)"
@@ -864,7 +493,7 @@ function Test-OneWorkspace {
     if (-not $problem.Interactive) {
         Write-Stage -Stage "run-main" -Message $problem.Slug
         foreach ($caseInfo in $validGeneratedCases) {
-            $mainResult = Invoke-External -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+            $mainResult = Invoke-External -RepoRoot $repoRoot -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
             if ($mainResult.TimedOut -or $mainResult.ExitCode -ne 0) {
                 $message = "主解失败：case=$($caseInfo.Name)"
                 if ($mainResult.TimedOut) { $message += " (TLE)" }
@@ -877,7 +506,7 @@ function Test-OneWorkspace {
             [System.IO.File]::WriteAllText($caseInfo.MainOutPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
             [System.IO.File]::WriteAllText($caseInfo.AnswerPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
 
-            $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $caseInfo.MainOutPath, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+            $judgeResult = Invoke-External -RepoRoot $repoRoot -FilePath $judgePath -Arguments @($caseInfo.InputPath, $caseInfo.MainOutPath, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
             if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
                 $message = "checker 未接受主解输出：case=$($caseInfo.Name)"
                 if ($judgeResult.Stderr) { $message += "`n$($judgeResult.Stderr.Trim())" }
@@ -894,7 +523,7 @@ function Test-OneWorkspace {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
 
                 $referenceOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $reference.Name + ".out")
-                $referenceResult = Invoke-External -FilePath $referenceInvocation.FilePath -Arguments $referenceInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+                $referenceResult = Invoke-External -RepoRoot $repoRoot -FilePath $referenceInvocation.FilePath -Arguments $referenceInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
                 if ($referenceResult.TimedOut -or $referenceResult.ExitCode -ne 0) {
                     $message = "参考解失败：solution=$($reference.Name), case=$($caseInfo.Name)"
                     if ($referenceResult.TimedOut) { $message += " (TLE)" }
@@ -905,7 +534,7 @@ function Test-OneWorkspace {
                 }
 
                 [System.IO.File]::WriteAllText($referenceOut, $referenceResult.Stdout, [System.Text.UTF8Encoding]::new($false))
-                $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $referenceOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+                $judgeResult = Invoke-External -RepoRoot $repoRoot -FilePath $judgePath -Arguments @($caseInfo.InputPath, $referenceOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
                 if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
                     $message = "参考解未通过 checker：solution=$($reference.Name), case=$($caseInfo.Name)"
                     if ($judgeResult.Stderr) { $message += "`n$($judgeResult.Stderr.Trim())" }
@@ -923,7 +552,7 @@ function Test-OneWorkspace {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
                 $testedCases += 1
                 $wrongOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".out")
-                $wrongResult = Invoke-External -FilePath $wrongInvocation.FilePath -Arguments $wrongInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+                $wrongResult = Invoke-External -RepoRoot $repoRoot -FilePath $wrongInvocation.FilePath -Arguments $wrongInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
                 if ($wrongResult.TimedOut -or $wrongResult.ExitCode -ne 0) {
                     $failedCases += 1
                     if ($wrong.Expected -eq "fail") {
@@ -932,7 +561,7 @@ function Test-OneWorkspace {
                     continue
                 }
                 [System.IO.File]::WriteAllText($wrongOut, $wrongResult.Stdout, [System.Text.UTF8Encoding]::new($false))
-                $judgeResult = Invoke-External -FilePath $judgePath -Arguments @($caseInfo.InputPath, $wrongOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
+                $judgeResult = Invoke-External -RepoRoot $repoRoot -FilePath $judgePath -Arguments @($caseInfo.InputPath, $wrongOut, $caseInfo.AnswerPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs 10000
                 if ($judgeResult.TimedOut -or $judgeResult.ExitCode -ne 0) {
                     $failedCases += 1
                 }
@@ -1042,10 +671,19 @@ function Test-OneWorkspace {
 }
 
 if (-not $script:IsWindowsHost) {
-    Invoke-External -FilePath "ulimit" -Arguments @("-s", "unlimited")
+    # 怎么 ulimit 这玩意这么复杂
+    Write-Stage -Stage "info" -Message "检测到在非 Windows 平台，正在开大栈空间"
+    $rLimitType = Get-Content "lib/RLimit.cs"
+    Add-Type $rLimitType
+    $val = [RLimit+rlimit]::new()
+    [RLimit]::getrlimit(3, [ref]$val)
+    $val.rlim_cur = $val.rlim_max
+    if ([RLimit]::setrlimit(3, [ref]$val) -ne 0) {
+        Write-Warning "未能开大栈空间，可能导致爆栈。如果失败，可以尝试在 bash 中使用 ulimit -s unlimited && $(" " -join $args) 来重试。"
+    }
 }
 
-$workspaceList = Resolve-WorkspaceList -Requested $Workspace
+$workspaceList = Resolve-WorkspaceList -RepoRoot $repoRoot -Requested $Workspace
 foreach ($workspacePath in $workspaceList) {
     Test-OneWorkspace -WorkspacePath $workspacePath
 }
