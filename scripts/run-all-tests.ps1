@@ -673,7 +673,7 @@ function Test-OneWorkspace {
 if (-not $script:IsWindowsHost) {
     # 怎么 ulimit 这玩意这么复杂
     Write-Stage -Stage "info" -Message "检测到在非 Windows 平台，正在开大栈空间"
-    $rLimitType = Get-Content "lib/RLimit.cs"
+    $rLimitType = Get-Content (Join-Path $PSScriptRoot "lib/RLimit.cs") -Raw
     Add-Type $rLimitType
     $val = [RLimit+rlimit]::new()
     [RLimit]::getrlimit(3, [ref]$val)
