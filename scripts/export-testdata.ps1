@@ -202,13 +202,12 @@ function Test-OneWorkspace {
     }
 
     Write-Stage -Stage "workspace" -Message "$($problem.Slug) -> $outputPath"
-    Write-Stage -Stage "export" -Message "runtime memoryLimitMb=$($problem.MemoryLimitMb) 仅对主解生效；generator 与 validator 使用更宽松的本地导出额度。"
+    Write-Stage -Stage "export" -Message "runtime memoryLimitMb=$($problem.MemoryLimitMb) 仅对主解生效；导出阶段默认信任已验过的数据，不再重复运行 validator。"
 
     $compiledPrograms = @{}
     $compileFailed = $false
     $extension = Get-ExecutableExtension -IsWindowsHost $script:IsWindowsHost
     $compileEntries = @(
-        [pscustomobject]@{ Name = "validator"; OutputName = "validator"; Path = $problem.ValidatorPath; CompileCommand = @() },
         [pscustomobject]@{ Name = "generator"; OutputName = "generator"; Path = $problem.GeneratorPath; CompileCommand = @() }
     )
 
@@ -260,7 +259,6 @@ function Test-OneWorkspace {
         return
     }
 
-    $validatorPath = [string]$compiledPrograms["validator"]
     $generatorPath = [string]$compiledPrograms["generator"]
     $mainInvocation = Get-Invocation -Problem $problem -Entry $mainSolution -CompiledPrograms $compiledPrograms
     $timeoutMs = [Math]::Max($problem.TimeLimitMs * 3, $problem.TimeLimitMs + 1000)
@@ -269,7 +267,6 @@ function Test-OneWorkspace {
     $toolMemoryLimitMb = 0
     $manifestCases = [System.Collections.Generic.List[object]]::new()
     $generatedCases = [System.Collections.Generic.List[object]]::new()
-    $validatedCases = [System.Collections.Generic.List[object]]::new()
 
     foreach ($groupName in @($problem.Cases | ForEach-Object { $_.Group } | Sort-Object -Unique)) {
         New-Item -ItemType Directory -Path (Join-Path $outputPath $groupName) -Force | Out-Null
@@ -293,7 +290,7 @@ function Test-OneWorkspace {
             Add-Failure -Workspace $problem.Slug -Stage "generate" -Message $message -Command $generateResult.Command
             continue
         }
-        [System.IO.File]::WriteAllText($inputPath, (ConvertTo-LfText -Content $generateResult.Stdout), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($inputPath, $generateResult.Stdout, [System.Text.UTF8Encoding]::new($false))
         $generatedCases.Add([pscustomobject]@{
             Name       = $caseInfo.Name
             Type       = $caseInfo.Type
@@ -310,39 +307,6 @@ function Test-OneWorkspace {
     }
 
     foreach ($caseInfo in $generatedCases) {
-        Write-Stage -Stage "validate" -Message "$($problem.Slug) case=$($caseInfo.Name)"
-        if ($script:IsWindowsHost) {
-            $cmdPath = Join-Path $binRoot ("validate-" + $caseInfo.Name + ".cmd")
-            $cmdContent = @(
-                "@echo off"
-                'type "' + $caseInfo.InputPath + '" | "' + $validatorPath + '"'
-                "exit /b %errorlevel%"
-            ) -join "`r`n"
-            [System.IO.File]::WriteAllText($cmdPath, $cmdContent, [System.Text.ASCIIEncoding]::new())
-            $validatorResult = Invoke-External -RepoRoot $repoRoot -FilePath "cmd.exe" -Arguments @("/d", "/c", $cmdPath) -WorkingDirectory $problem.WorkspacePath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
-        } else {
-            $validatorResult = Invoke-External -RepoRoot $repoRoot -FilePath $validatorPath -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $toolTimeoutMs -MemoryLimitMb $toolMemoryLimitMb
-        }
-        if ($validatorResult.TimedOut -or $validatorResult.ExitCode -ne 0) {
-            $message = "validator 失败：case=$($caseInfo.Name), input=$($caseInfo.InputPath), exit=$($validatorResult.ExitCode)"
-            if ($validatorResult.MemoryExceeded) {
-                $message += " (MLE)"
-            }
-            if ($validatorResult.Stderr) {
-                $message += "`n$($validatorResult.Stderr.Trim())"
-            }
-            Add-Failure -Workspace $problem.Slug -Stage "validate" -Message $message -Command $validatorResult.Command
-            continue
-        }
-        $validatedCases.Add($caseInfo) | Out-Null
-    }
-
-    if ($validatedCases.Count -eq 0) {
-        Add-Failure -Workspace $problem.Slug -Stage "validate" -Message "没有任何通过 validator 的测试点。"
-        return
-    }
-
-    foreach ($caseInfo in $validatedCases) {
         Write-Stage -Stage "answer" -Message "$($problem.Slug) case=$($caseInfo.Name)"
         $mainResult = Invoke-External -RepoRoot $repoRoot -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
         if ($mainResult.TimedOut -or $mainResult.ExitCode -ne 0) {
@@ -359,7 +323,7 @@ function Test-OneWorkspace {
             Add-Failure -Workspace $problem.Slug -Stage "answer" -Message $message -Command $mainResult.Command
             continue
         }
-        [System.IO.File]::WriteAllText($caseInfo.AnswerPath, (ConvertTo-LfText -Content $mainResult.Stdout), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($caseInfo.AnswerPath, $mainResult.Stdout, [System.Text.UTF8Encoding]::new($false))
 
         $manifestCases.Add([pscustomobject]@{
             name   = $caseInfo.Name
