@@ -1,7 +1,12 @@
+# executable and temp files
 .codex*
 tmp
 *.exe
 __pycache__
+
+# exported file
+*.zip
+exports/**
 
 # ignore all generated files except the examples
 examples/**
