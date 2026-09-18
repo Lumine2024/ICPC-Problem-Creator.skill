@@ -679,7 +679,7 @@ if (-not $script:IsWindowsHost) {
     [RLimit]::getrlimit(3, [ref]$val)
     $val.rlim_cur = $val.rlim_max
     if ([RLimit]::setrlimit(3, [ref]$val) -ne 0) {
-        Write-Warning "未能开大栈空间，可能导致爆栈。如果失败，可以尝试在 bash 中使用 ulimit -s unlimited && $(" " -join $args) 来重试。"
+        Write-Stage -Stage "info" -Message "未能开大栈空间，可能导致爆栈。如果失败，可以尝试在 bash 中使用 ulimit -s unlimited && pwsh $(" " -join $args) 来重试。"
     }
 }
 

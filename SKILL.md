@@ -13,6 +13,19 @@ user-invocable: true
 
 目标 OJ 不支持 git。本仓库只用于出题、内部维护、本地生成与本地验题。每道题的工作流都必须由 `config.json` 驱动。
 
+## 本地文件与 Git
+
+- 新题默认只保存在本地工作区，不执行 `git add`、`git commit`、`git push` 或其他上传操作；只有用户明确要求时才处理 Git 发布。
+- 不修改 `.gitignore`。即使新工作区被现有规则忽略，也直接在本地完成并向用户说明其路径，不通过改动 `.gitignore` 让它出现在 `git status` 中。
+- 委派子 agent 时也要明确传达以上两条，避免各 agent 为了让新文件可见而自行修改 Git 配置。
+
+## 从照片或图片整理题目
+
+- 在实现前，对每张原始图片进行一次完整识别，立即把题意、输入输出、全部数据范围、样例、页码与原文件名转写成可复用的文字记录。后续 agent 应读取这份文字记录，不重复打开整张图片。
+- 图片包含配图时，同时用 HTML（可含 CSS、内联 SVG）重绘图形，保存 HTML 源文件并渲染检查；题面引用由 HTML 渲染的图，不嵌入原照片或原截图。
+- 对确实看不清的局部，只裁切并放大该区域复核，在文字记录中标出原先的不确定点和核对结果；不要反复重新识别整页。
+- 编码前先用文字记录逐项核对样例与约束；完成后再核对题面、题解、标程、generator、validator 与原始记录，避免让转写错误传播到所有产物。
+
 ## 额外触发场景
 
 如果用户明确提出以下意图，也应使用本 skill：
@@ -95,6 +108,7 @@ user-invocable: true
 并遵守这些规则：
 - 不要把“立刻阻塞主流程”的架构设计外包出去
 - 明确提醒每个子 agent：它不是独自在代码库里工作，不能回滚别人的修改
+- 明确提醒每个子 agent 不修改 `.gitignore`，新题默认不提交或上传 Git；图片整理应复用首次转写的文字与 HTML
 - 不要把 `magic-and-crab` 的具体示例错解脚本直接写进 skill 或委派提示词
 
 ## 主 agent 的顺序
@@ -266,9 +280,23 @@ user-invocable: true
 
 ## 验证
 
-总是运行验证：
-- 全仓库：`./scripts/run-all-tests.ps1`
-- 单题：`./scripts/run-all-tests.ps1 -Workspace "examples/<slug>"`
+总是运行验证，并把验题输出通过 `scripts/filter-run-all-tests.ps1` 过滤后再交给 agent。它只显示工作区结果、失败信息、复现命令和少量诊断，完整原始输出自动保存在 `.codex-test-artifacts/logs/`。`2>&1 6>&1` 必须保留：分别把错误流和 `Write-Host` 使用的信息流送入过滤器。
+
+单题：
+
+```powershell
+& ./scripts/run-all-tests.ps1 -Workspace "examples/<slug>" 2>&1 6>&1 |
+    & ./scripts/filter-run-all-tests.ps1
+if ($LASTEXITCODE -ne 0) { throw "验题失败；查看过滤器给出的完整日志路径" }
+```
+
+全仓库：
+
+```powershell
+& ./scripts/run-all-tests.ps1 2>&1 6>&1 |
+    & ./scripts/filter-run-all-tests.ps1
+if ($LASTEXITCODE -ne 0) { throw "验题失败；查看过滤器给出的完整日志路径" }
+```
 
 如果验证失败，就修文件并重跑，直到通过。
 
