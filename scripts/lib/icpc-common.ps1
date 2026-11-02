@@ -148,11 +148,12 @@ function Invoke-External {
         [int]$TimeoutMs = 0,
         [int]$MemoryLimitMb = 0,
         [int]$StartRetryCount = 5,
-        [int]$StartRetryDelayMs = 300
+        [int]$StartRetryDelayMs = 300,
+        [hashtable]$Environment = @{}
     )
 
     $command = Format-Command -FilePath $FilePath -Arguments $Arguments
-    Write-Host $command -ForegroundColor DarkGray
+    Write-Verbose $command
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $FilePath
@@ -161,6 +162,7 @@ function Invoke-External {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.RedirectStandardInput = $true
+    foreach ($key in $Environment.Keys) { $psi.Environment[$key] = [string]$Environment[$key] }
     foreach ($argument in $Arguments) {
         [void]$psi.ArgumentList.Add([string]$argument)
     }
@@ -193,17 +195,27 @@ function Invoke-External {
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
 
+    $inputTask = $null
+    $inputClosed = $false
     if ($InputFile) {
         $content = [System.IO.File]::ReadAllText($InputFile)
-        [void]$process.StandardInput.WriteAsync($content).GetAwaiter().GetResult()
+        $inputTask = $process.StandardInput.WriteAsync($content)
+    } else {
+        $process.StandardInput.Close()
+        $inputClosed = $true
     }
-    $process.StandardInput.Close()
 
     $timedOut = $false
     $memoryExceeded = $false
     $memoryLimitBytes = if ($MemoryLimitMb -gt 0) { [int64]$MemoryLimitMb * 1MB } else { 0L }
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not $process.HasExited) {
+        # Writing a large stdin must not block timeout enforcement (or crash on an early exit).
+        if (-not $inputClosed -and $inputTask.IsCompleted) {
+            try { [void]$inputTask.GetAwaiter().GetResult() } catch [System.IO.IOException] { }
+            try { $process.StandardInput.Close() } catch [System.IO.IOException] { }
+            $inputClosed = $true
+        }
         $shouldKill = $false
         if ($TimeoutMs -gt 0 -and $watch.ElapsedMilliseconds -gt $TimeoutMs) {
             $timedOut = $true
@@ -230,6 +242,9 @@ function Invoke-External {
     }
 
     $process.WaitForExit()
+    if (-not $inputClosed) {
+        try { $process.StandardInput.Close() } catch [System.IO.IOException] { }
+    }
     $stdoutTask.Wait()
     $stderrTask.Wait()
 

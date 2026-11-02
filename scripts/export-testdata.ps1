@@ -77,6 +77,9 @@ function Read-ProblemConfig {
     $configPath = Join-Path $WorkspacePath "config.json"
     Assert-FileExists -Path $configPath -Description "config.json"
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+    if ($config.ContainsKey('communication')) {
+        throw '通信题需要双次运行调度器，不能作为普通题导出答案。请使用 run-all-tests.ps1 生成并验证隐藏输入与 transcript。'
+    }
 
     foreach ($required in @("slug", "title", "interactive", "timeLimitMs", "memoryLimitMb", "standard", "statement", "tutorial", "validator", "generator", "solutions")) {
         if (-not $config.ContainsKey($required)) {

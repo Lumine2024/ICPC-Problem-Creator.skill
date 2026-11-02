@@ -10,11 +10,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-try {
-    Import-Module powershell-yaml -ErrorAction Stop
-} catch {
-    throw "导出 Hydro 包需要 PowerShell 模块 powershell-yaml。请先安装：Install-Module powershell-yaml -Scope CurrentUser"
-}
 . (Join-Path $PSScriptRoot "lib/icpc-common.ps1")
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -59,7 +54,11 @@ function Read-ProblemConfig {
 
     $configPath = Join-Path $WorkspacePath "config.json"
     Assert-FileExists -Path $configPath -Description "config.json"
-    return Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+    if ($config.ContainsKey('communication')) {
+        throw '通信题需要双次运行和独立沙箱；现有 Hydro 普通题/交互题导出器不支持，不能生成语义错误的题包。'
+    }
+    return $config
 }
 
 function Test-ExportManifest {
@@ -382,6 +381,11 @@ if (-not (Test-Path -LiteralPath $workspacePath -PathType Container)) {
 }
 
 $config = Read-ProblemConfig -WorkspacePath $workspacePath
+try {
+    Import-Module powershell-yaml -ErrorAction Stop
+} catch {
+    throw "导出 Hydro 包需要 PowerShell 模块 powershell-yaml。请先安装：Install-Module powershell-yaml -Scope CurrentUser"
+}
 $outputPath = Resolve-OutputPath -Path $Output -WorkspacePath $workspacePath -Config $config
 $outputDirectory = Split-Path -Parent $outputPath
 if (-not [string]::IsNullOrWhiteSpace($outputDirectory)) {

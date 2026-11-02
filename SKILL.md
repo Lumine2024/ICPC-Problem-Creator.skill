@@ -1,7 +1,7 @@
 ---
 name: icpc-problem-creator
 description: |
-    你是一名 ICPC 比赛的出题者，负责把一个 idea 落成完整、可本地验证、可继续迭代的题目工作区。适用于需要在本仓库中创建或补全题面、题解、标程、错解、generator、validator、checker 或 interactor，并让 `config.json` 驱动 `scripts/run-all-tests.ps1` 的场景；也适用于把现有工作区导出为 Hydro 风格题目 zip。该 skill 默认采用主 agent + 3 个子 agent 的并行协作：主 agent 先定题目架构并搭好工作区，再并行委派 judge/validator、正解/题解、错解/gen，自己在等待期间编写题面，最后统一集成并跑通验证。
+    你是一名 ICPC 比赛的出题者，负责把一个 idea 落成完整、可本地验证、可继续迭代的题目工作区。支持普通题、交互题和双次运行通信题，适用于需要在本仓库中创建或补全题面、题解、标程、错解、generator、validator、checker 或 interactor，并让 `config.json` 驱动 `scripts/run-all-tests.ps1` 的场景；也适用于把现有工作区导出为 Hydro 风格题目 zip（通信题暂不支持）。该 skill 默认采用主 agent + 3 个子 agent 的并行协作：主 agent 先定题目架构并搭好工作区，再并行委派 judge/validator、正解/题解、错解/gen，自己在等待期间编写题面，最后统一集成并跑通验证。
     触发关键词：造题、出题、命题；造数据、卡错解；写题面、写题解；写 generator/validator；导出为 Hydro 题面
 tools: [vscode, execute, read, agent, edit, search, web, browser, todo]
 user-invocable: true
@@ -41,7 +41,7 @@ user-invocable: true
 
 1. 当缺失信息会明显影响正确性时，必须追问：
 - 题目名 / slug
-- 是否为交互题
+- 题型：普通题、交互题或双次运行通信题
 - 期望正解方向或复杂度
 - 关键数据范围
 - 是否存在特殊 judge 规则
@@ -56,6 +56,7 @@ user-invocable: true
 3. 创建或补全工作区：
 - 普通题：`./scripts/create-workspace.ps1 -Name "<slug>"`
 - 交互题：`./scripts/create-workspace.ps1 -Name "<slug>" -Interactive`
+- 通信题：先用交互题模板创建，再按下文“通信题”补充双次运行配置与两个评测组件
 - 若工作区已存在，则补齐缺失文件，并迁移到 `config.json` 工作流
 
 4. 如果用户要“导出为 Hydro 风格题目”，优先确认或推断：
@@ -79,6 +80,7 @@ user-invocable: true
 1. `subskills/judge-validator/SKILL.md`
 - 普通题写 `checker`
 - 交互题写 `interactor`
+- 通信题同时写 `interactor` 和 `checker`，分别检查第一次运行和第二次运行
 - 写 `validator`
 - 必要时更新相关 `config.json` 字段
 
@@ -120,7 +122,7 @@ user-invocable: true
 5. 在等待时完成 `docs/statement.md`。
 6. 集成子 agent 结果：
 - 确保题面、题解、代码、`config.json` 一致
-- 确保普通题用 `checker`，交互题用 `interactor`
+- 确保普通题用 `checker`，单次交互题用 `interactor`，通信题同时使用两者
 - 核对 case 名、type、seed、group、`checkWith`、`wrongSolutions`
 - 核对所有被引用文件真实存在
 7. 运行验证；如果失败，修到通过为止。
@@ -147,8 +149,8 @@ user-invocable: true
 |   |-- wrong
 |   |   \-- *.cpp
 |   |-- checker
-|   |   \-- checker.cpp         # 普通题
-|   |   \-- interactor.cpp      # 交互题
+|   |   |-- checker.cpp         # 普通题或通信题第二次运行
+|   |   \-- interactor.cpp      # 交互题或通信题第一次运行
 |   |-- validator
 |   |   \-- validator.cpp
 |   \-- generator
@@ -168,7 +170,7 @@ user-invocable: true
 - 所有路径都相对题目根目录
 - 每个 generator case 都必须能由 `type + seed` 复现
 - 普通题使用 `checker`
-- 交互题使用 `interactor`
+- 单次交互题使用 `interactor`；通信题同时使用 `interactor` 与 `checker`
 
 至少保证这些字段语义正确：
 
@@ -232,10 +234,31 @@ user-invocable: true
 ```
 
 补充规则：
-- `checker` 与 `interactor` 二选一
+- 普通题与单次交互题的 `checker`、`interactor` 二选一；通信题必须同时声明两者
 - `build.cppFlags` 与单文件 `compileCommand` 可以覆盖默认参数
 - `checkWith` 用来限制某些 case 只跑指定参考解
 - `wrongSolutions[*].cases` 与 `wrongSolutions[*].groups` 可限制错解运行范围
+
+## 通信题
+
+通信题让同一选手程序运行两次：第一次编码信息，第二次只根据协议允许传递的内容解码，两次运行不能共享内存或文件。题面必须分别说明两次运行的输入输出、阶段标识、通信限制和资源限制，并提供两个阶段的样例。
+
+当前脚本支持字符串修改类的 Polygon 双次运行模式：第一次交互，第二次非交互。工作区需在常规配置之外声明：
+
+- `interactive=true`、`runTwice=true`、`interactiveSecondInvocation=false`。
+- `interactor` 与 `checker` 的源文件路径；两者都要编译。
+- `communication` 对象：`sourceLength`、`messageLength`、`maxChanges`、`maxCases` 为正整数，`maxChanges <= sourceLength`；`alphabet` 为互异的小写英文字母组成的字符串。这些值按题意配置，勿直接照搬示例题。
+
+评测数据流必须保持以下契约：
+
+1. generator 和 validator 处理隐藏输入。第一次运行的 interactor 从 `inf` 读取隐藏数据，向选手提供完整的第一阶段输入，从 `ouf` 检查编码输出的格式、数量和通信限制，并读至 EOF。允许选手先读完所有任务再统一输出，无需逐组刷新。
+2. 第一次运行全部检查通过后，interactor 将第二次运行允许接收的完整输入写入 `tout`，再以 `_ok` 结束；失败时不启动第二次运行，也不向 `tout` 写入有效数据。
+3. 在新进程中再次运行同一选手程序，直接使用 `tout` 的原始内容作为输入，不额外附加隐藏消息或重建通信记录。
+4. checker 的 `inf` 是隐藏输入，`ouf` 与 `ans` 只包含第二次运行的输出。checker 检查恢复结果并将两份输出读至 EOF；第一次输出的合法性由 interactor 负责。interactor 的 FAIL 属于评测故障，不能算作成功卡掉错解。
+
+`scripts/run-all-tests.ps1` 自动运行上述流程，`scripts/run-communication.ps1` 可单独复现；通信记录保存在 `.codex-test-artifacts/communication/`。通信题验收还应运行 `scripts/test-communication.ps1 -Workspace "<workspace>"`，检查批量/流式输入输出、`tout` 的内容、阶段隔离及第一次失败后不启动第二次运行。资源限制分别作用于两次运行。
+
+参考 [git-fish-chat 工作区](examples/git-fish-chat/readme.md) 和[评测设计](examples/git-fish-chat/docs/judging.md) 理解现有实现；其他通信协议需要相应适配，不能只改题面。正式 OJ 负责独立沙箱，本地工具用于可信出题程序的联调。当前 `export-testdata.ps1` 和 `export-hydrozip.ps1` 都会拒绝通信题，不能按普通题或单次交互题导出。
 
 ## 产物标准
 
@@ -248,7 +271,7 @@ user-invocable: true
 - 多个“看起来合理但会错”的错解
 - 支持 `argv[1] = case type`、`argv[2] = seed` 的 generator
 - 使用 `testlib.h` 严格校验格式与 EOF 的 validator
-- 完整 checker 或 interactor
+- 完整 checker 或 interactor；通信题必须同时具备两者
 - 不允许保留 TODO、占位文本、空实现
 
 ## 题面写法
@@ -280,23 +303,23 @@ user-invocable: true
 
 ## 验证
 
-总是运行验证，并把验题输出通过 `scripts/filter-run-all-tests.ps1` 过滤后再交给 agent。它只显示工作区结果、失败信息、复现命令和少量诊断，完整原始输出自动保存在 `.codex-test-artifacts/logs/`。`2>&1 6>&1` 必须保留：分别把错误流和 `Write-Host` 使用的信息流送入过滤器。
+总是直接运行 `scripts/run-all-tests.ps1` 验证。默认仅显示工作区进度、通过结果、警告、失败诊断及复现命令；编译、生成、校验、正解/错解检查等阶段详情和外部命令只在启用 `-Verbose` 时显示。该开关由 PowerShell 的 `[CmdletBinding()]` 原生提供，类型为 `[switch]`，支持 `-Verbose:$false`，无需另接过滤脚本。
 
 单题：
 
 ```powershell
-& ./scripts/run-all-tests.ps1 -Workspace "examples/<slug>" 2>&1 6>&1 |
-    & ./scripts/filter-run-all-tests.ps1
-if ($LASTEXITCODE -ne 0) { throw "验题失败；查看过滤器给出的完整日志路径" }
+& ./scripts/run-all-tests.ps1 -Workspace "examples/<slug>"
+if ($LASTEXITCODE -ne 0) { throw "验题失败；查看上方诊断及复现命令" }
 ```
 
 全仓库：
 
 ```powershell
-& ./scripts/run-all-tests.ps1 2>&1 6>&1 |
-    & ./scripts/filter-run-all-tests.ps1
-if ($LASTEXITCODE -ne 0) { throw "验题失败；查看过滤器给出的完整日志路径" }
+& ./scripts/run-all-tests.ps1
+if ($LASTEXITCODE -ne 0) { throw "验题失败；查看上方诊断及复现命令" }
 ```
+
+需要排查详情时添加 `-Verbose`。需要保存详细日志时可执行 `./scripts/run-all-tests.ps1 -Workspace "examples/<slug>" -Verbose *> run-all-tests.log`，并检查退出码；脚本不再自动生成过滤器日志，既有构建产物和通信记录仍保留在 `.codex-test-artifacts/`。
 
 如果验证失败，就修文件并重跑，直到通过。
 
@@ -323,7 +346,7 @@ if ($LASTEXITCODE -ne 0) { throw "验题失败；查看过滤器给出的完整�
 - 题面完整
 - 题解完整
 - 标程与参考解完整
-- validator、generator、checker 或 interactor 完整
+- validator、generator、checker 或 interactor 完整；通信题的 checker 与 interactor 均完整，且真实双次运行验证通过
 - 有多个典型错解
 - `config.json` 能驱动 `run-all-tests.ps1`
 - 要求的测试确实跑通

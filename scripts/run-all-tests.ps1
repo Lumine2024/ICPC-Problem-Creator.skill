@@ -1,11 +1,14 @@
 #!/usr/bin/env pwsh
 
+# CmdletBinding supplies the native [switch]$Verbose common parameter.
+# Keep command traces and routine stage details on the verbose stream.
 [CmdletBinding()]
 param(
     [string[]]$Workspace
 )
 
 . (Join-Path $PSScriptRoot "lib/icpc-common.ps1")
+. (Join-Path $PSScriptRoot "lib/communication.ps1")
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -29,15 +32,13 @@ function Write-Stage {
         [string]$Message
     )
 
+    if ($Stage -notin @('workspace', 'success')) {
+        Write-Verbose "[$Stage] $Message"
+        return
+    }
+
     $color = switch ($Stage) {
         "workspace" { "Cyan" }
-        "info" { "DarkCyan" }
-        "compile" { "Yellow" }
-        "generate" { "Magenta" }
-        "validate" { "Blue" }
-        "run-main" { "Green" }
-        "check-reference" { "DarkGreen" }
-        "check-wrong" { "DarkYellow" }
         "success" { "Green" }
         default { "White" }
     }
@@ -83,8 +84,8 @@ function Invoke-InteractivePair {
 
     $contestantCommand = Format-Command -FilePath $ContestantFilePath -Arguments $ContestantArguments
     $interactorCommand = Format-Command -FilePath $InteractorFilePath -Arguments $InteractorArguments
-    Write-Host $contestantCommand -ForegroundColor DarkGray
-    Write-Host $interactorCommand -ForegroundColor DarkGray
+    Write-Verbose $contestantCommand
+    Write-Verbose $interactorCommand
 
     $python = $null
     foreach ($candidate in @("python", "python3")) {
@@ -141,6 +142,7 @@ function Read-ProblemConfig {
     $configPath = Join-Path $WorkspacePath "config.json"
     Assert-FileExists -Path $configPath -Description "config.json"
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+    $communication = Read-CommunicationConfig -Config $config
 
     foreach ($required in @("slug", "title", "interactive", "timeLimitMs", "memoryLimitMb", "standard", "statement", "tutorial", "validator", "generator", "solutions")) {
         if (-not $config.ContainsKey($required)) {
@@ -221,6 +223,7 @@ function Read-ProblemConfig {
         WorkspacePath         = $WorkspacePath
         Slug                  = [string]$config.slug
         Interactive           = $interactive
+        Communication         = $communication
         TimeLimitMs           = [int]$config.timeLimitMs
         MemoryLimitMb         = [int]$config.memoryLimitMb
         Standard              = [string]$config.standard
@@ -229,7 +232,7 @@ function Read-ProblemConfig {
         TutorialPath          = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.tutorial) -Description "tutorial"
         ValidatorPath         = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.validator) -Description "validator"
         GeneratorPath         = Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.generator.path) -Description "generator"
-        CheckerPath           = if ($interactive) { $null } else { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.checker) -Description "checker" }
+        CheckerPath           = if (-not $interactive -or $null -ne $communication) { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.checker) -Description "checker" } else { $null }
         InteractorPath        = if ($interactive) { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.interactor) -Description "interactor" } else { $null }
         InteractionAnswerPath = if ($config.ContainsKey("interactionAnswer")) { Resolve-ProblemPath -WorkspaceRoot $WorkspacePath -RelativePath ([string]$config.interactionAnswer) -Description "interactionAnswer" } else { $null }
         BuildConfig           = $buildConfig
@@ -249,6 +252,10 @@ function New-BuildLayout {
     )
 
     $buildRoot = Join-Path $artifactRoot (Join-Path "build" $Slug)
+    if ($Slug -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw '非法构建 slug。' }
+    $buildRoot = [IO.Path]::GetFullPath($buildRoot)
+    $expectedParent = [IO.Path]::GetFullPath((Join-Path $artifactRoot 'build'))
+    if ((Split-Path -Parent $buildRoot) -ne $expectedParent) { throw '构建目录超出预期范围。' }
     if (Test-Path -LiteralPath $buildRoot) {
         Remove-Item -LiteralPath $buildRoot -Recurse -Force
     }
@@ -315,12 +322,21 @@ function Test-CaseMatchesEntry {
     return $true
 }
 
+function Invoke-Contestant {
+    param([pscustomobject]$Problem, [pscustomobject]$Invocation, [string]$InputFile, [int]$TimeoutMs)
+    if ($null -ne $Problem.Communication) {
+        return Invoke-Communication -RepoRoot $repoRoot -Spec $Problem.Communication -FilePath $Invocation.FilePath -Arguments $Invocation.Arguments -InputFile $InputFile -TimeoutMs $Problem.TimeLimitMs -MemoryLimitMb $Problem.MemoryLimitMb -InteractorFilePath $Problem.CompiledInteractor -PythonCommand $Problem.PythonCommand
+    }
+    return Invoke-External -RepoRoot $repoRoot -FilePath $Invocation.FilePath -Arguments $Invocation.Arguments -WorkingDirectory $Problem.WorkspacePath -InputFile $InputFile -TimeoutMs $TimeoutMs -MemoryLimitMb $Problem.MemoryLimitMb
+}
+
 function Test-OneWorkspace {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkspacePath
     )
 
+    $failureCountBefore = $script:Failures.Count
     $problem = $null
     try {
         $problem = Read-ProblemConfig -WorkspacePath $WorkspacePath
@@ -341,10 +357,13 @@ function Test-OneWorkspace {
         [pscustomobject]@{ Name = "input-tool"; OutputName = "validator"; Path = $problem.ValidatorPath; CompileCommand = @() },
         [pscustomobject]@{ Name = "gen-tool"; OutputName = "generator"; Path = $problem.GeneratorPath; CompileCommand = @() }
     )
-    if ($problem.Interactive) {
+    if ($problem.Interactive -and $null -eq $problem.Communication) {
         $compileEntries += [pscustomobject]@{ Name = "judge-tool"; OutputName = "interactor"; Path = $problem.InteractorPath; CompileCommand = @() }
     } else {
         $compileEntries += [pscustomobject]@{ Name = "judge-tool"; OutputName = "checker"; Path = $problem.CheckerPath; CompileCommand = @() }
+    }
+    if ($null -ne $problem.Communication) {
+        $compileEntries += [pscustomobject]@{ Name = "channel-tool"; OutputName = "interactor"; Path = $problem.InteractorPath; CompileCommand = @() }
     }
     $compileEntries += @($problem.Solutions + $problem.WrongSolutions)
     $compileEntryByName = @{}
@@ -404,6 +423,9 @@ function Test-OneWorkspace {
     $validatorPath = [string]$compiledPrograms["input-tool"]
     $generatorPath = [string]$compiledPrograms["gen-tool"]
     $judgePath = [string]$compiledPrograms["judge-tool"]
+    if ($null -ne $problem.Communication) {
+        $problem | Add-Member -NotePropertyName CompiledInteractor -NotePropertyValue ([string]$compiledPrograms['channel-tool'])
+    }
     $timeoutMs = [Math]::Max($problem.TimeLimitMs * 3, $problem.TimeLimitMs + 1000)
     $toolTimeoutMs = [Math]::Max($problem.TimeLimitMs * 60, 60000)
     $runtimeMemoryLimitMb = [Math]::Max($problem.MemoryLimitMb, 1)
@@ -490,10 +512,10 @@ function Test-OneWorkspace {
     $mainSolution = @($problem.Solutions | Where-Object { $_.Role -eq "main" })[0]
     $mainInvocation = Get-Invocation -Problem $problem -Entry $mainSolution -CompiledPrograms $compiledPrograms
 
-    if (-not $problem.Interactive) {
+    if (-not $problem.Interactive -or $null -ne $problem.Communication) {
         Write-Stage -Stage "run-main" -Message $problem.Slug
         foreach ($caseInfo in $validGeneratedCases) {
-            $mainResult = Invoke-External -RepoRoot $repoRoot -FilePath $mainInvocation.FilePath -Arguments $mainInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+            $mainResult = Invoke-Contestant -Problem $problem -Invocation $mainInvocation -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
             if ($mainResult.TimedOut -or $mainResult.ExitCode -ne 0) {
                 $message = "主解失败：case=$($caseInfo.Name)"
                 if ($mainResult.TimedOut) { $message += " (TLE)" }
@@ -523,7 +545,7 @@ function Test-OneWorkspace {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $reference)) { continue }
 
                 $referenceOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $reference.Name + ".out")
-                $referenceResult = Invoke-External -RepoRoot $repoRoot -FilePath $referenceInvocation.FilePath -Arguments $referenceInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+                $referenceResult = Invoke-Contestant -Problem $problem -Invocation $referenceInvocation -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
                 if ($referenceResult.TimedOut -or $referenceResult.ExitCode -ne 0) {
                     $message = "参考解失败：solution=$($reference.Name), case=$($caseInfo.Name)"
                     if ($referenceResult.TimedOut) { $message += " (TLE)" }
@@ -552,7 +574,7 @@ function Test-OneWorkspace {
                 if (-not (Test-CaseMatchesEntry -Case $caseInfo -Entry $wrong)) { continue }
                 $testedCases += 1
                 $wrongOut = Join-Path (Split-Path -Parent $caseInfo.InputPath) ($caseInfo.Name + "." + $wrong.Name + ".out")
-                $wrongResult = Invoke-External -RepoRoot $repoRoot -FilePath $wrongInvocation.FilePath -Arguments $wrongInvocation.Arguments -WorkingDirectory $problem.WorkspacePath -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs -MemoryLimitMb $runtimeMemoryLimitMb
+                $wrongResult = Invoke-Contestant -Problem $problem -Invocation $wrongInvocation -InputFile $caseInfo.InputPath -TimeoutMs $timeoutMs
                 if ($wrongResult.TimedOut -or $wrongResult.ExitCode -ne 0) {
                     $failedCases += 1
                     if ($wrong.Expected -eq "fail") {
@@ -667,7 +689,9 @@ function Test-OneWorkspace {
         }
     }
 
-    Write-Stage -Stage "success" -Message "$($problem.Slug) passed $($generatedCases.Count) cases."
+    if ($script:Failures.Count -eq $failureCountBefore) {
+        Write-Stage -Stage "success" -Message "$($problem.Slug) passed $($generatedCases.Count) cases."
+    }
 }
 
 if (-not $script:IsWindowsHost) {
@@ -679,7 +703,7 @@ if (-not $script:IsWindowsHost) {
     [RLimit]::getrlimit(3, [ref]$val)
     $val.rlim_cur = $val.rlim_max
     if ([RLimit]::setrlimit(3, [ref]$val) -ne 0) {
-        Write-Stage -Stage "info" -Message "未能开大栈空间，可能导致爆栈。如果失败，可以尝试在 bash 中使用 ulimit -s unlimited && pwsh $(" " -join $args) 来重试。"
+        Write-Warning "未能开大栈空间，可能导致爆栈。如果失败，可以尝试在 bash 中使用 ulimit -s unlimited && pwsh $(" " -join $args) 来重试。"
     }
 }
 
@@ -701,3 +725,4 @@ if ($script:Failures.Count -gt 0) {
 }
 
 Write-Host "全部测试通过。" -ForegroundColor Green
+exit 0

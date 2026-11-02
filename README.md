@@ -103,6 +103,14 @@
 
 ## 使用方式
 
+### 双次运行通信题
+
+当前通信题工具支持字符串修改类的 Polygon 双次运行模式。在 `config.json` 中声明 `interactive=true`、`runTwice=true`、`interactiveSecondInvocation=false`，同时提供 `interactor`、`checker` 和 `communication` 对象（`sourceLength`、`messageLength`、`maxChanges`、`maxCases`、`alphabet`）。第一阶段的 testlib interactor 提供 Alice 的完整输入，并从 `ouf` 检查所有 `t`；全部通过后将 Bob 的完整输入写到 `tout`。第二阶段在新进程中直接以该文件为输入运行 Bob，由 checker 检查 Bob 的输出。选手可按常规输入输出编程，无需逐组刷新或等待反馈。
+
+参考完整工作区 [Slacking Off with Git](examples/git-fish-chat/readme.md) 和[评测设计](examples/git-fish-chat/docs/judging.md)。该题隐藏输入为 `Q` 及逐组的 `s,x`；checker 的 `ouf` 和 `ans` 都只有 Bob 的 `Q` 条消息。`scripts/run-communication.ps1` 用于单独复现，`scripts/test-communication.ps1` 检查批量/流式读写、`tout` 通道、第一阶段短路及其他基础设施行为。其他通信协议需要适配；创建方式和完整评测契约见 [SKILL.md 的通信题说明](SKILL.md#通信题)。
+
+这是本地可信联调能力。正式评测需要为两阶段提供独立沙箱；现有 Hydro 普通题/交互题导出流程会明确拒绝通信题。
+
 ### 手动造题
 
 先创建题目工作区：
@@ -119,8 +127,20 @@
 ```powershell
 ./scripts/run-all-tests.ps1
 ./scripts/run-all-tests.ps1 -Workspace "examples/example-problem"
+./scripts/run-all-tests.ps1 -Workspace "examples/example-problem" -Verbose
 ./scripts/export-testdata.ps1 -Workspace "examples/example-problem"
 ```
+
+验题默认显示工作区进度、通过结果、警告，以及失败时的诊断和复现命令。添加 `-Verbose` 后，才会显示各个执行阶段、编译和运行的完整命令及观察信息；`-Verbose:$false` 可显式关闭详细输出。直接调用入口即可，无需外接输出过滤脚本。`-Verbose` 使用 `[CmdletBinding()]` 提供的 PowerShell 原生 switch 参数。
+
+脚本全部通过时退出码为 `0`，失败时为非零值。需要保存详细日志时，可运行：
+
+```powershell
+./scripts/run-all-tests.ps1 -Workspace "examples/example-problem" -Verbose *> run-all-tests.log
+if ($LASTEXITCODE -ne 0) { throw '验题失败；查看 run-all-tests.log' }
+```
+
+详细日志按需重定向保存；构建产物和通信题运行记录仍位于 `.codex-test-artifacts/`。
 
 如果目标 OJ 不支持本地 `generator`，可以再执行一次：
 
@@ -164,7 +184,7 @@ npx skills add .
 ## 仓库里有哪些核心内容
 
 - `scripts/create-workspace.ps1`：创建新的题目工作区。
-- `scripts/run-all-tests.ps1`：统一执行本地验证。
+- `scripts/run-all-tests.ps1`：统一验证普通题、交互题和双次运行通信题；默认简洁输出，`-Verbose` 展开详情。
 - `scripts/export-testdata.ps1`：导出普通题静态数据，或导出交互题喂给 interactor 的原始数据文件。
 - `scripts/templates/`：普通题、交互题和共享文件模板。
 - `examples/`：可直接运行的示例题工作区。
